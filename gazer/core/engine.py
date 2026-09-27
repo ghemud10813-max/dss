@@ -1,0 +1,670 @@
+"""The engine: camera → tracking → pointer/gestures → OS input.
+
+`EngineCore` is pure logic (feed it features, it drives an InputBackend) and
+is fully testable without a camera. `CursorOutput` glides the real cursor at
+125 Hz toward the pointer target, so motion is smooth even though the camera
+runs at 30 fps; it also yields to the physical mouse. `EngineRunner` owns the
+camera and tracker threads and publishes snapshots via callbacks (the Qt
+layer turns those into signals).
+"""
+
+from __future__ import annotations
+
+import logging
+import math
+import queue
+import threading
+import time
+from dataclasses import dataclass, field
+from typing import Callable
+
+import cv2
+import numpy as np
+
+from gazer.config import AppConfig, CameraSettings
+from gazer.core.camera import CameraStream
+from gazer.core.features import FaceFeatures, extract_features
+from gazer.core.gestures import BindingResolver, EyeClosure, GestureDetector, raw_gesture_values
+from gazer.core.input_backend import InputBackend
+from gazer.core.interaction import ActionWheel, DwellDetector, Rect, WheelView, ZoomLens, ZoomView
+from gazer.core.pointer import GAZE_MODES, MODE_ORDER, PointerEngine
+from gazer.core.profiles import Profile
+from gazer.core.screen import ScreenRect
+
+log = logging.getLogger("gazer.engine")
+
+CLICK_ACTIONS = {"left_click": ("left", 1), "right_click": ("right", 1), "double_click": ("left", 2),
+                 "middle_click": ("middle", 1)}
+ALWAYS_ALLOWED = {"pause_toggle", "resume", "stop"}
+
+
+@dataclass
+class Snapshot:
+    t: float = 0.0
+    face: bool = False
+    control: bool = False
+    paused: bool = False
+    calibrating: bool = False
+    mode: str = "hybrid"
+    pointer: tuple[float, float] | None = None
+    gaze: tuple[float, float] | None = None
+    gaze_ready: bool = False
+    dwell_enabled: bool = False
+    dwell_progress: float = 0.0
+    gesture_values: dict[str, float] = field(default_factory=dict)
+    gesture_active: list[str] = field(default_factory=list)
+    closure: tuple[float, float] = (0.0, 0.0)
+    head: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    scrolling: bool = False
+    scroll_rate: tuple[float, float] = (0.0, 0.0)
+    dragging: bool = False
+    precision: bool = False
+    wheel: WheelView | None = None
+    zoom: ZoomView | None = None
+    features: FaceFeatures | None = None
+    quality: float = 0.0
+    events: list[tuple] = field(default_factory=list)
+    # filled by the runner
+    fps: float = 0.0
+    cam_fps: float = 0.0
+    latency_ms: float = 0.0
+    points: np.ndarray | None = None
+    preview: np.ndarray | None = None
+
+
+class CursorOutput:
+    def __init__(self, backend: InputBackend, smoothing_ms: float = 35, hz: float = 125,
+                 manual_override: bool = True, on_manual: Callable[[tuple[int, int]], None] | None = None):
+        self.backend = backend
+        self.smoothing_ms = smoothing_ms
+        self.manual_override = manual_override
+        self.on_manual = on_manual
+        self._period = 1.0 / hz
+        self._lock = threading.RLock()
+        self._target: np.ndarray | None = None
+        self._cur: np.ndarray | None = None
+        self._last_set: tuple[int, int] | None = None
+        self.manual_until = 0.0
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._run, name="gazer-cursor", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=1)
+            self._thread = None
+
+    def set_target(self, p) -> None:
+        with self._lock:
+            self._target = None if p is None else np.asarray(p, dtype=np.float64)
+
+    def move_now(self, p) -> None:
+        with self._lock:
+            self._target = np.asarray(p, dtype=np.float64)
+            self._cur = self._target.copy()
+            self.backend.move(*self._cur)
+            self._last_set = self.backend.position()
+
+    @property
+    def manual_active(self) -> bool:
+        return time.perf_counter() < self.manual_until
+
+    def step(self, now: float, dt: float) -> None:
+        with self._lock:
+            actual = self.backend.position()
+            if self.manual_override and self._last_set is not None:
+                if abs(actual[0] - self._last_set[0]) > 4 or abs(actual[1] - self._last_set[1]) > 4:
+                    self.manual_until = now + 1.2
+                    self._last_set = actual
+                    self._cur = np.array(actual, dtype=np.float64)
+                    if self.on_manual:
+                        self.on_manual(actual)
+                    return
+            if now < self.manual_until:
+                self._last_set = actual
+                return
+            if self._target is None:
+                self._last_set = None
+                self._cur = None
+                return
+            if self._cur is None:
+                self._cur = np.array(actual, dtype=np.float64)
+            tau = max(self.smoothing_ms, 1.0) / 1000.0
+            a = 1.0 - math.exp(-dt / tau)
+            self._cur = self._cur + (self._target - self._cur) * a
+            if float(np.hypot(*(self._target - self._cur))) < 0.5:
+                self._cur = self._target.copy()
+            self.backend.move(*self._cur)
+            self._last_set = self.backend.position()
+
+    def _run(self) -> None:
+        last = time.perf_counter()
+        while not self._stop.is_set():
+            now = time.perf_counter()
+            try:
+                self.step(now, now - last)
+            except Exception:
+                log.exception("cursor output")
+            last = now
+            time.sleep(max(0.0, self._period - (time.perf_counter() - now)))
+
+
+class EngineCore:
+    def __init__(self, profile: Profile, screen: ScreenRect, backend: InputBackend,
+                 output: CursorOutput | None = None):
+        self.profile = profile
+        self.screen = screen
+        self.backend = backend
+        self.output = output or CursorOutput(backend, manual_override=False)
+        self.output.on_manual = self._on_manual
+        self.control = False
+        self.paused = False
+        self.calibrating = False
+        self.dragging = False
+        self.wheel: ActionWheel | None = None
+        self.zoom: ZoomLens | None = None
+        self.requests: list[tuple[str, object]] = []
+        self._events: list[tuple] = []
+        self._last_feats: FaceFeatures | None = None
+        self._last_closure: tuple[float, float] = (1.0, 1.0)
+        self._face_lost_since: float | None = None
+        self._scroll_started = 0.0
+        self._t = 0.0
+        self._active_since: float | None = None
+        self.bind_profile(profile)
+
+    # ------------------------------------------------------------ profile
+
+    def bind_profile(self, profile: Profile) -> None:
+        self.profile = profile
+        s = profile.settings
+        self.pointer = PointerEngine(s.pointer, s.scroll, s.head_cal, self.screen)
+        self.closure = EyeClosure()
+        self.gestures = GestureDetector(s.gestures)
+        self.bindings = BindingResolver(s.gestures.bindings)
+        self.dwell = DwellDetector()
+        self.reload_settings()
+
+    def reload_settings(self) -> None:
+        s = self.profile.settings
+        self.pointer.s = s.pointer
+        self.pointer.scroll_s = s.scroll
+        self.pointer.set_calibration(s.head_cal)
+        self.pointer.apply_settings()
+        self.gestures.s = s.gestures
+        self.bindings = BindingResolver(s.gestures.bindings)
+        self.dwell.radius = s.dwell.radius_px
+        self.dwell.dwell_s = s.dwell.time_ms / 1000
+        self.dwell.cooldown_s = s.dwell.cooldown_ms / 1000
+        self.output.smoothing_ms = s.pointer.output_smoothing_ms
+        self.output.manual_override = s.pointer.manual_override
+
+    # ------------------------------------------------------------ control
+
+    @property
+    def active(self) -> bool:
+        return self.control and not self.paused and not self.calibrating
+
+    def set_control(self, on: bool) -> None:
+        if on == self.control:
+            return
+        self.control = on
+        self.paused = False
+        if on:
+            self.pointer.sync(self.backend.position())
+            self.profile.stats.sessions += 1
+            self._active_since = self._t
+        else:
+            self._stop_everything()
+            self.output.set_target(None)
+            self._flush_active_time()
+        self._toast("Control on" if on else "Control off")
+
+    def set_paused(self, paused: bool) -> None:
+        if paused == self.paused:
+            return
+        self.paused = paused
+        if paused:
+            self._stop_everything()
+            self.output.set_target(None)
+            self._flush_active_time()
+        else:
+            self.pointer.sync(self.backend.position())
+            self._active_since = self._t
+        self._toast("Paused — long blink to resume" if paused else "Resumed")
+
+    def set_calibrating(self, on: bool) -> None:
+        self.calibrating = on
+        if on:
+            self._stop_everything()
+            self.output.set_target(None)
+        else:
+            self.pointer.sync(self.backend.position())
+
+    def _flush_active_time(self) -> None:
+        if self._active_since is not None:
+            self.profile.stats.seconds_active += max(0.0, self._t - self._active_since)
+            self._active_since = None
+
+    def _stop_everything(self) -> None:
+        if self.dragging:
+            self.backend.button("left", False)
+            self.dragging = False
+        if self.pointer.scrolling:
+            self.pointer.stop_scroll()
+        self.wheel = None
+        self.zoom = None
+        self.dwell.reset()
+
+    def _on_manual(self, pos) -> None:
+        self.pointer.sync(pos)
+        self.dwell.reset()
+
+    def _toast(self, text: str) -> None:
+        self._events.append(("toast", text))
+
+    # -------------------------------------------------------------- frame
+
+    def process(self, t: float, feats: FaceFeatures | None) -> Snapshot:
+        self._t = t
+        s = self.profile.settings
+        if feats is not None:
+            self._last_feats = feats
+            self._face_lost_since = None
+            closure = self.closure.update(feats)
+            self._last_closure = closure
+            raw = raw_gesture_values(feats, closure, self.closure.swapped, s.gestures.swap_sides)
+            events = self.gestures.update(t, raw)
+        else:
+            closure = (0.0, 0.0)
+            if self._face_lost_since is None:
+                self._face_lost_since = t
+            events = self.gestures.release_all(t)
+            if self.dragging and t - self._face_lost_since > 1.0:
+                self.perform("drag_toggle")  # safety: never leave the button stuck down
+
+        gaze_n = None
+        want_gaze = s.pointer.mode in GAZE_MODES or s.overlay.show_gaze_dot
+        if feats is not None and want_gaze and self.profile.gaze.ready and max(closure) < 0.5:
+            gaze_n = self.profile.gaze.predict(feats.gaze_vector)
+
+        out = self.pointer.update(t, feats, gaze_n)
+
+        for req in self.bindings.process(t, events):
+            if self.active or (self.control and req.action in ALWAYS_ALLOWED):
+                self.profile.stats.gestures += 1
+                self.perform(req.action, req.phase)
+
+        if self.active and not self.output.manual_active:
+            self._drive(t, feats, out)
+        elif not self.active:
+            self.dwell.reset()
+
+        return Snapshot(
+            t=t, face=feats is not None, control=self.control, paused=self.paused,
+            calibrating=self.calibrating, mode=s.pointer.mode,
+            pointer=None if self.pointer.P is None else (float(self.pointer.P[0]), float(self.pointer.P[1])),
+            gaze=None if out.gaze is None else (float(out.gaze[0]), float(out.gaze[1])),
+            gaze_ready=self.profile.gaze.ready, dwell_enabled=s.dwell.enabled,
+            dwell_progress=self.dwell.progress if self.active else 0.0,
+            gesture_values=dict(self.gestures.values), gesture_active=list(self.gestures.active),
+            closure=closure,
+            head=(feats.yaw, feats.pitch, feats.roll) if feats else (0.0, 0.0, 0.0),
+            scrolling=self.pointer.scrolling,
+            scroll_rate=(float(self.pointer.scroll_rate[0]), float(self.pointer.scroll_rate[1])),
+            dragging=self.dragging, precision=self.pointer.precision,
+            wheel=self.wheel.view() if self.wheel else None,
+            zoom=self.zoom.view() if self.zoom else None,
+            features=feats, quality=feats.quality if feats else 0.0,
+            events=self._drain_events(),
+        )
+
+    def _drain_events(self) -> list[tuple]:
+        ev, self._events = self._events, []
+        return ev
+
+    def _drive(self, t: float, feats: FaceFeatures | None, out) -> None:
+        s = self.profile.settings
+        if out.scroll != (0, 0):
+            self.backend.scroll(out.scroll[0], out.scroll[1])
+        if self.pointer.scrolling:
+            if t - self._scroll_started > s.scroll.timeout_s:
+                self.pointer.stop_scroll()
+                self._toast("Scroll mode off")
+            return
+        if out.pos is None:
+            return
+        if self.wheel is not None:
+            state, idx = self.wheel.update(t, out.pos)
+            if state == "select" and idx is not None:
+                self._wheel_select(idx)
+            elif state == "cancel":
+                self._close_wheel()
+            return
+        if self.zoom is not None:
+            lens_p = self.zoom.clamp_to_lens(out.pos)
+            self.pointer.P = lens_p.copy()
+            self.zoom.pointer = lens_p
+            self.output.set_target(self.zoom.to_real(lens_p))
+            if self.zoom.expired(t):
+                self._close_zoom()
+                return
+        else:
+            self.output.set_target(out.pos)
+        if s.dwell.enabled and feats is not None:
+            if self.dwell.update(t, self.pointer.P):
+                self.perform(s.dwell.action if s.dwell.action != "none" else "left_click")
+        else:
+            self.dwell.reset()
+
+    # ------------------------------------------------------------ actions
+
+    def perform(self, action: str, phase: str = "fire") -> None:
+        if action == "drag_hold" and phase == "up":
+            if self.dragging:
+                self._drag(False)
+            return
+        if not self.control and action not in ("calibrate", "keyboard_toggle", "voice_toggle"):
+            return
+        if self.paused and action not in ALWAYS_ALLOWED:
+            return
+        if action == "drag_hold":
+            if phase == "down" and not self.dragging:
+                self._drag(True)
+            elif phase in ("up", "fire") and self.dragging:
+                self._drag(False)
+            elif phase == "fire":
+                self._drag(True)
+            return
+        if phase == "up":
+            return
+        self._events.append(("action", action))
+
+        if action in CLICK_ACTIONS:
+            if self.wheel is not None:
+                if self.wheel.hover is not None:
+                    self._wheel_select(self.wheel.hover)
+                else:
+                    self._close_wheel()
+                return
+            button, count = CLICK_ACTIONS[action]
+            self._click(button, count)
+        elif action == "drag_toggle":
+            self._drag(not self.dragging)
+        elif action == "scroll_mode":
+            if self.pointer.scrolling:
+                self.pointer.stop_scroll()
+                self._toast("Scroll mode off")
+            else:
+                self.pointer.start_scroll()
+                self._scroll_started = self._t
+                self._toast("Scroll mode — move head up/down")
+        elif action in ("scroll_up", "scroll_down"):
+            self.backend.scroll(360 if action == "scroll_up" else -360)
+        elif action == "action_wheel":
+            if self.wheel is not None:
+                self._close_wheel()
+            else:
+                self._open_wheel()
+        elif action == "zoom":
+            if self.zoom is not None:
+                self._close_zoom()
+            else:
+                self._open_zoom()
+        elif action == "pause_toggle":
+            self.set_paused(not self.paused)
+        elif action == "pause":
+            self.set_paused(True)
+        elif action == "resume":
+            self.set_paused(False)
+        elif action == "stop":
+            self._stop_everything()
+            self._toast("Stopped")
+        elif action == "recenter":
+            self._recenter()
+        elif action == "precision_toggle":
+            self.pointer.set_precision(not self.pointer.precision)
+            self._toast("Precision on" if self.pointer.precision else "Precision off")
+        elif action == "mode_cycle":
+            i = MODE_ORDER.index(self.profile.settings.pointer.mode) if \
+                self.profile.settings.pointer.mode in MODE_ORDER else -1
+            self.set_mode(MODE_ORDER[(i + 1) % len(MODE_ORDER)])
+        elif action.startswith("mode:"):
+            self.set_mode(action[5:])
+        elif action == "dwell_toggle":
+            d = self.profile.settings.dwell
+            d.enabled = not d.enabled
+            self._toast("Dwell click on" if d.enabled else "Dwell click off")
+        elif action in ("keyboard_toggle", "voice_toggle", "calibrate"):
+            self.requests.append((action, None))
+        elif action.startswith("key:"):
+            self.backend.tap(action[4:])
+        elif action.startswith("hotkey:"):
+            self.backend.hotkey(action[7:])
+        elif action.startswith("type:"):
+            text = action[5:]
+            self.backend.type_text(text)
+            self.profile.stats.keys_typed += len(text)
+
+    def set_mode(self, mode: str) -> None:
+        if mode not in MODE_ORDER:
+            return
+        self.profile.settings.pointer.mode = mode
+        self.pointer.sync(self.pointer.P)
+        if mode in GAZE_MODES and not self.profile.gaze.ready:
+            self._toast("Mode: " + mode + " — calibrate gaze for best results")
+        else:
+            self._toast("Mode: " + mode.replace("_", " "))
+        self._events.append(("mode", mode))
+
+    def _click(self, button: str, count: int) -> None:
+        if self.zoom is not None:
+            target = self.zoom.to_real(self.zoom.pointer)
+            self._close_zoom(sync_to=target)
+            learn = True
+        else:
+            target = np.array(self.pointer.P)
+            learn = self.profile.settings.pointer.mode != "gaze"
+        self.output.move_now(target)
+        self.backend.click(button, count)
+        self.profile.stats.clicks += 1
+        self.dwell.reset()
+        self._events.append(("click", (float(target[0]), float(target[1])), button))
+        if (learn and self.profile.settings.pointer.adaptive_learning and self._last_feats is not None
+                and self.profile.gaze.ready and max(self._last_closure) < 0.5):
+            if self.profile.gaze.learn_from_click(self._last_feats.gaze_vector, self.screen.px_to_norm(*target)):
+                self.profile.stats.implicit_samples += 1
+
+    def _drag(self, down: bool) -> None:
+        if down == self.dragging:
+            return
+        if down:
+            self.output.move_now(self.pointer.P)
+        self.backend.button("left", down)
+        self.dragging = down
+        self._toast("Dragging — repeat to drop" if down else "Dropped")
+
+    def _open_wheel(self) -> None:
+        w = self.profile.settings.wheel
+        anchor = np.array(self.pointer.P)
+        self.output.move_now(anchor)
+        self.output.set_target(anchor)
+        self.wheel = ActionWheel(anchor, list(w.items), w.radius_px, w.select_dwell_ms / 1000, w.timeout_s,
+                                 t0=self._t)
+        self.dwell.reset()
+
+    def _close_wheel(self) -> None:
+        if self.wheel is not None:
+            self.pointer.sync(self.wheel.center)
+        self.wheel = None
+        self.dwell.reset()
+
+    def _wheel_select(self, idx: int) -> None:
+        assert self.wheel is not None
+        action = self.wheel.items[idx]
+        self._close_wheel()
+        self.perform(action)
+
+    def _open_zoom(self) -> None:
+        z = self.profile.settings.zoom
+        sc = self.screen
+        self.zoom = ZoomLens(self.pointer.P, z.factor, z.region_w, z.region_h,
+                             Rect(sc.x, sc.y, sc.width, sc.height), t0=self._t, timeout_s=z.timeout_s)
+        self.pointer.sync(self.zoom.pointer)
+        self.output.move_now(self.zoom.to_real(self.zoom.pointer))
+        self.dwell.reset()
+
+    def _close_zoom(self, sync_to=None) -> None:
+        if self.zoom is not None:
+            self.pointer.sync(sync_to if sync_to is not None else self.zoom.to_real(self.zoom.pointer))
+        self.zoom = None
+        self.dwell.reset()
+
+    def _recenter(self) -> None:
+        self.pointer.recenter()
+        f = self._last_feats
+        gz = self.profile.gaze
+        if f is not None and gz.ready and self.profile.settings.pointer.mode != "gaze":
+            pred = gz.predict(f.gaze_vector)
+            if pred is not None:
+                gz.nudge(pred, self.screen.px_to_norm(*self.pointer.P))
+        self.pointer.stab.reset()
+        self._toast("Recentered")
+
+
+class EngineRunner:
+    """Camera + tracker loop in a background thread."""
+
+    def __init__(self, config: AppConfig, core: EngineCore,
+                 on_snapshot: Callable[[Snapshot], None],
+                 on_status: Callable[[str], None] | None = None):
+        self.config = config
+        self.core = core
+        self.on_snapshot = on_snapshot
+        self.on_status = on_status or (lambda s: None)
+        self.camera: CameraStream | None = None
+        self.tracker = None
+        self.want_preview = False
+        self.preview_width = 480
+        self._cmds: queue.Queue[Callable[[EngineCore], None]] = queue.Queue()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self.camera_ok = False
+
+    def post(self, fn: Callable[[EngineCore], None]) -> None:
+        self._cmds.put(fn)
+
+    def start(self) -> None:
+        self._stop.clear()
+        self.core.output.start()
+        self._thread = threading.Thread(target=self._run, name="gazer-engine", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=3)
+            self._thread = None
+        self.core.output.stop()
+        self.core.set_control(False)
+
+    def restart_camera(self, settings: CameraSettings) -> None:
+        self.config.camera = settings
+        self.post(lambda core: setattr(self, "_restart", True))
+
+    def _open_camera(self) -> bool:
+        if self.camera is not None:
+            self.camera.stop()
+        self.on_status("Opening camera…")
+        self.camera = CameraStream(self.config.camera)
+        ok = self.camera.start()
+        self.camera_ok = ok
+        self.on_status(f"Camera {self.camera.size[0]}×{self.camera.size[1]} via {self.camera.backend_used}"
+                       if ok else self.camera.error)
+        return ok
+
+    def _run(self) -> None:
+        try:
+            from gazer.core.tracker import FaceTracker
+
+            self.tracker = FaceTracker()
+        except Exception as exc:
+            log.exception("tracker init")
+            self.on_status(f"Face tracker failed: {exc}")
+            return
+        self._restart = True
+        seq = 0
+        times: list[float] = []
+        while not self._stop.is_set():
+            while True:
+                try:
+                    fn = self._cmds.get_nowait()
+                except queue.Empty:
+                    break
+                try:
+                    fn(self.core)
+                except Exception:
+                    log.exception("engine command")
+            if self._restart:
+                self._restart = False
+                seq = 0
+                if not self._open_camera():
+                    self._sleep_or_stop(2.0)
+                    self._restart = True
+                    continue
+            assert self.camera is not None
+            frame = self.camera.read(seq, timeout=0.5)
+            if frame is None:
+                snap = self.core.process(time.perf_counter(), None)
+                snap.cam_fps = self.camera.fps
+                self._emit(snap)
+                continue
+            seq = frame.seq
+            img = cv2.flip(frame.image, 1) if self.config.camera.mirror else frame.image
+            rgb = np.ascontiguousarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+            try:
+                obs = self.tracker.process(rgb, frame.t)
+                feats = extract_features(obs) if obs is not None else None
+            except Exception:
+                log.exception("tracking")
+                obs, feats = None, None
+            try:
+                snap = self.core.process(frame.t, feats)
+            except Exception:
+                log.exception("engine process")
+                continue
+            now = time.perf_counter()
+            times.append(now)
+            while times and now - times[0] > 1.0:
+                times.pop(0)
+            snap.fps = float(len(times))
+            snap.cam_fps = self.camera.fps
+            snap.latency_ms = (now - frame.t) * 1000
+            if self.want_preview:
+                h, w = img.shape[:2]
+                scale = self.preview_width / w
+                snap.preview = cv2.resize(img, (self.preview_width, int(h * scale)), interpolation=cv2.INTER_AREA)
+                if obs is not None:
+                    snap.points = obs.points[:, :2] * scale
+            self._emit(snap)
+        if self.camera is not None:
+            self.camera.stop()
+        if self.tracker is not None:
+            self.tracker.close()
+
+    def _emit(self, snap: Snapshot) -> None:
+        req, self.core.requests = self.core.requests, []
+        for kind, data in req:
+            snap.events.append(("request", kind, data))
+        try:
+            self.on_snapshot(snap)
+        except Exception:
+            log.exception("snapshot callback")
+
+    def _sleep_or_stop(self, seconds: float) -> None:
+        self._stop.wait(seconds)
