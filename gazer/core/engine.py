@@ -22,7 +22,6 @@ import cv2
 import numpy as np
 
 from gazer.config import AppConfig, CameraSettings
-from gazer.core.camera import CameraStream
 from gazer.core.features import FaceFeatures, extract_features
 from gazer.core.gestures import BindingResolver, EyeClosure, GestureDetector, raw_gesture_values
 from gazer.core.input_backend import InputBackend
@@ -30,6 +29,8 @@ from gazer.core.interaction import ActionWheel, DwellDetector, Rect, WheelView, 
 from gazer.core.pointer import GAZE_MODES, MODE_ORDER, PointerEngine
 from gazer.core.profiles import Profile
 from gazer.core.screen import ScreenRect
+from gazer.core.sources import CameraSource, FrameSource
+from gazer.core.zones import ZoneDetector
 
 log = logging.getLogger("gazer.engine")
 
@@ -46,6 +47,7 @@ class Snapshot:
     paused: bool = False
     calibrating: bool = False
     mode: str = "hybrid"
+    mode_effective: str = "hybrid"
     pointer: tuple[float, float] | None = None
     gaze: tuple[float, float] | None = None
     gaze_ready: bool = False
@@ -63,6 +65,9 @@ class Snapshot:
     zoom: ZoomView | None = None
     features: FaceFeatures | None = None
     quality: float = 0.0
+    zone: tuple[str, float] | None = None  # (zone name, dwell progress)
+    zones_enabled: bool = False
+    blinked: bool = False
     events: list[tuple] = field(default_factory=list)
     # filled by the runner
     fps: float = 0.0
@@ -70,6 +75,8 @@ class Snapshot:
     latency_ms: float = 0.0
     points: np.ndarray | None = None
     preview: np.ndarray | None = None
+    mesh: np.ndarray | None = None  # (478, 3) face-centred, y up, ~unit face width
+    source: str = ""
 
 
 class CursorOutput:
@@ -188,6 +195,7 @@ class EngineCore:
         self.gestures = GestureDetector(s.gestures)
         self.bindings = BindingResolver(s.gestures.bindings)
         self.dwell = DwellDetector()
+        self.zones = ZoneDetector(s.zones, self.screen.width / max(self.screen.height, 1))
         self.reload_settings()
 
     def reload_settings(self) -> None:
@@ -203,6 +211,16 @@ class EngineCore:
         self.dwell.cooldown_s = s.dwell.cooldown_ms / 1000
         self.output.smoothing_ms = s.pointer.output_smoothing_ms
         self.output.manual_override = s.pointer.manual_override
+        self.zones.s = s.zones
+
+    @property
+    def effective_mode(self) -> str:
+        """Gaze modes need a calibrated model; until then fall back to head mouse
+        so the cursor never just freezes."""
+        mode = self.profile.settings.pointer.mode
+        if mode in GAZE_MODES and not self.profile.gaze.ready:
+            return "head_mouse"
+        return mode
 
     # ------------------------------------------------------------ control
 
@@ -260,6 +278,7 @@ class EngineCore:
         self.wheel = None
         self.zoom = None
         self.dwell.reset()
+        self.zones.reset()
 
     def _on_manual(self, pos) -> None:
         self.pointer.sync(pos)
@@ -289,16 +308,18 @@ class EngineCore:
                 self.perform("drag_toggle")  # safety: never leave the button stuck down
 
         gaze_n = None
-        want_gaze = s.pointer.mode in GAZE_MODES or s.overlay.show_gaze_dot
-        if feats is not None and want_gaze and self.profile.gaze.ready and max(closure) < 0.5:
+        if feats is not None and self.profile.gaze.ready and max(closure) < 0.5:
             gaze_n = self.profile.gaze.predict(feats.gaze_vector)
 
-        out = self.pointer.update(t, feats, gaze_n)
+        mode = self.effective_mode
+        out = self.pointer.update(t, feats, gaze_n, mode)
 
         for req in self.bindings.process(t, events):
             if self.active or (self.control and req.action in ALWAYS_ALLOWED):
                 self.profile.stats.gestures += 1
                 self.perform(req.action, req.phase)
+
+        self._update_zones(t, out, mode)
 
         if self.active and not self.output.manual_active:
             self._drive(t, feats, out)
@@ -307,7 +328,7 @@ class EngineCore:
 
         return Snapshot(
             t=t, face=feats is not None, control=self.control, paused=self.paused,
-            calibrating=self.calibrating, mode=s.pointer.mode,
+            calibrating=self.calibrating, mode=s.pointer.mode, mode_effective=mode,
             pointer=None if self.pointer.P is None else (float(self.pointer.P[0]), float(self.pointer.P[1])),
             gaze=None if out.gaze is None else (float(out.gaze[0]), float(out.gaze[1])),
             gaze_ready=self.profile.gaze.ready, dwell_enabled=s.dwell.enabled,
@@ -321,8 +342,25 @@ class EngineCore:
             wheel=self.wheel.view() if self.wheel else None,
             zoom=self.zoom.view() if self.zoom else None,
             features=feats, quality=feats.quality if feats else 0.0,
+            zone=(self.zones.current, self.zones.progress) if self.zones.current else None,
+            zones_enabled=s.zones.enabled, blinked=self.gestures.blinked,
             events=self._drain_events(),
         )
+
+    def _update_zones(self, t: float, out, mode: str) -> None:
+        if not self.control or self.calibrating or self.wheel is not None or self.zoom is not None \
+                or self.pointer.scrolling or self.output.manual_active:
+            self.zones.reset()
+            return
+        p = None
+        if out.gaze is not None and mode in GAZE_MODES:
+            p = self.screen.px_to_norm(*out.gaze)
+        elif self.pointer.P is not None and out.pos is not None:
+            p = self.screen.px_to_norm(*self.pointer.P)
+        for action in self.zones.update(t, p):
+            if self.active or action in ALWAYS_ALLOWED:
+                self._events.append(("zone", self.zones.current, action))
+                self.perform(action)
 
     def _drain_events(self) -> list[tuple]:
         ev, self._events = self._events, []
@@ -356,7 +394,7 @@ class EngineCore:
                 return
         else:
             self.output.set_target(out.pos)
-        if s.dwell.enabled and feats is not None:
+        if s.dwell.enabled and feats is not None and self.zones.current is None:
             if self.dwell.update(t, self.pointer.P):
                 self.perform(s.dwell.action if s.dwell.action != "none" else "left_click")
         else:
@@ -436,6 +474,10 @@ class EngineCore:
             self.set_mode(MODE_ORDER[(i + 1) % len(MODE_ORDER)])
         elif action.startswith("mode:"):
             self.set_mode(action[5:])
+        elif action == "zones_toggle":
+            z = self.profile.settings.zones
+            z.enabled = not z.enabled
+            self._toast("Gaze zones on" if z.enabled else "Gaze zones off")
         elif action == "dwell_toggle":
             d = self.profile.settings.dwell
             d.enabled = not d.enabled
@@ -456,6 +498,7 @@ class EngineCore:
             return
         self.profile.settings.pointer.mode = mode
         self.pointer.sync(self.pointer.P)
+        self.pointer.stab.reset()
         if mode in GAZE_MODES and not self.profile.gaze.ready:
             self._toast("Mode: " + mode + " — calibrate gaze for best results")
         else:
@@ -537,23 +580,38 @@ class EngineCore:
         self._toast("Recentered")
 
 
+def normalized_mesh(points: np.ndarray) -> np.ndarray:
+    """Landmarks → face-centred coordinates for the 3D hologram (y up, z toward
+    the viewer, 2 units ≈ face width). Head pose stays baked in."""
+    fw = float(np.hypot(*(points[454, :2] - points[234, :2]))) or 1.0
+    c = points[:468].mean(axis=0)
+    m = (points - c) / (fw / 2)
+    m[:, 1] *= -1
+    m[:, 2] *= -1
+    return m.astype(np.float32)
+
+
 class EngineRunner:
-    """Camera + tracker loop in a background thread."""
+    """Frame source + tracker loop in a background thread."""
 
     def __init__(self, config: AppConfig, core: EngineCore,
                  on_snapshot: Callable[[Snapshot], None],
-                 on_status: Callable[[str], None] | None = None):
+                 on_status: Callable[[str], None] | None = None,
+                 source_factory: Callable[[AppConfig], FrameSource] | None = None):
         self.config = config
         self.core = core
         self.on_snapshot = on_snapshot
         self.on_status = on_status or (lambda s: None)
-        self.camera: CameraStream | None = None
-        self.tracker = None
+        self.source_factory = source_factory or (lambda cfg: CameraSource(cfg.camera))
+        self.source: FrameSource | None = None
         self.want_preview = False
+        self.want_mesh = False
         self.preview_width = 480
+        self.status = "Starting…"
         self._cmds: queue.Queue[Callable[[EngineCore], None]] = queue.Queue()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._restart = True
         self.camera_ok = False
 
     def post(self, fn: Callable[[EngineCore], None]) -> None:
@@ -577,62 +635,60 @@ class EngineRunner:
         self.config.camera = settings
         self.post(lambda core: setattr(self, "_restart", True))
 
-    def _open_camera(self) -> bool:
-        if self.camera is not None:
-            self.camera.stop()
-        self.on_status("Opening camera…")
-        self.camera = CameraStream(self.config.camera)
-        ok = self.camera.start()
+    def _set_status(self, text: str) -> None:
+        self.status = text
+        self.on_status(text)
+
+    def _open_source(self) -> bool:
+        if self.source is not None:
+            self.source.close()
+        self._set_status("Opening camera…")
+        self.source = self.source_factory(self.config)
+        ok = self.source.open()
         self.camera_ok = ok
-        self.on_status(f"Camera {self.camera.size[0]}×{self.camera.size[1]} via {self.camera.backend_used}"
-                       if ok else self.camera.error)
+        self._set_status(self.source.description if ok else self.source.error)
         return ok
 
-    def _run(self) -> None:
-        try:
-            from gazer.core.tracker import FaceTracker
+    def _drain_commands(self) -> None:
+        while True:
+            try:
+                fn = self._cmds.get_nowait()
+            except queue.Empty:
+                return
+            try:
+                fn(self.core)
+            except Exception:
+                log.exception("engine command")
 
-            self.tracker = FaceTracker()
-        except Exception as exc:
-            log.exception("tracker init")
-            self.on_status(f"Face tracker failed: {exc}")
-            return
-        self._restart = True
-        seq = 0
+    def _run(self) -> None:
         times: list[float] = []
         while not self._stop.is_set():
-            while True:
-                try:
-                    fn = self._cmds.get_nowait()
-                except queue.Empty:
-                    break
-                try:
-                    fn(self.core)
-                except Exception:
-                    log.exception("engine command")
+            self._drain_commands()
             if self._restart:
                 self._restart = False
-                seq = 0
-                if not self._open_camera():
+                if not self._open_source():
                     self._sleep_or_stop(2.0)
                     self._restart = True
                     continue
-            assert self.camera is not None
-            frame = self.camera.read(seq, timeout=0.5)
+            assert self.source is not None
+            try:
+                frame = self.source.next(self.want_preview, timeout=0.5)
+            except Exception:
+                log.exception("frame source")
+                frame = None
+                self._sleep_or_stop(0.05)
             if frame is None:
                 snap = self.core.process(time.perf_counter(), None)
-                snap.cam_fps = self.camera.fps
+                snap.cam_fps = self.source.fps
+                snap.source = self.source.name
                 self._emit(snap)
                 continue
-            seq = frame.seq
-            img = cv2.flip(frame.image, 1) if self.config.camera.mirror else frame.image
-            rgb = np.ascontiguousarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+            obs = frame.obs
             try:
-                obs = self.tracker.process(rgb, frame.t)
                 feats = extract_features(obs) if obs is not None else None
             except Exception:
-                log.exception("tracking")
-                obs, feats = None, None
+                log.exception("features")
+                feats = None
             try:
                 snap = self.core.process(frame.t, feats)
             except Exception:
@@ -643,19 +699,21 @@ class EngineRunner:
             while times and now - times[0] > 1.0:
                 times.pop(0)
             snap.fps = float(len(times))
-            snap.cam_fps = self.camera.fps
+            snap.cam_fps = self.source.fps
             snap.latency_ms = (now - frame.t) * 1000
-            if self.want_preview:
+            snap.source = self.source.name
+            if obs is not None and self.want_mesh:
+                snap.mesh = normalized_mesh(obs.points)
+            if self.want_preview and frame.image is not None:
+                img = frame.image
                 h, w = img.shape[:2]
                 scale = self.preview_width / w
                 snap.preview = cv2.resize(img, (self.preview_width, int(h * scale)), interpolation=cv2.INTER_AREA)
                 if obs is not None:
                     snap.points = obs.points[:, :2] * scale
             self._emit(snap)
-        if self.camera is not None:
-            self.camera.stop()
-        if self.tracker is not None:
-            self.tracker.close()
+        if self.source is not None:
+            self.source.close()
 
     def _emit(self, snap: Snapshot) -> None:
         req, self.core.requests = self.core.requests, []

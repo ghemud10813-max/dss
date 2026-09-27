@@ -18,7 +18,8 @@ from gazer.config import GESTURE_CATALOG, Binding, GestureSettings
 from gazer.core.features import FaceFeatures
 from gazer.core.filters import RollingPercentile
 
-NO_NEUTRAL = {"wink_left", "wink_right", "long_blink", "tilt_left", "tilt_right"}
+NO_NEUTRAL = {"wink_left", "wink_right", "long_blink", "tilt_left", "tilt_right", "double_blink"}
+EVENT_GESTURES = {"double_blink"}  # detected from event timing, not a threshold
 _PAIRS = [
     ("eyeBlinkLeft", "eyeBlinkRight"), ("mouthLeft", "mouthRight"),
     ("mouthSmileLeft", "mouthSmileRight"), ("browDownLeft", "browDownRight"),
@@ -98,6 +99,51 @@ def raw_gesture_values(f: FaceFeatures, closure: tuple[float, float], swapped: b
     }
 
 
+class BlinkCounter:
+    """Detects complete blinks (both eyes shut then open) and double blinks.
+
+    A natural blink is ~100–300 ms and blinks rarely come in pairs this close
+    together, so two *complete* blinks within `window_s` is a deliberate
+    eyes-only click. A closure held longer than `max_blink_s` (a long blink or
+    squint) never counts.
+    """
+
+    def __init__(self, threshold: float = 0.55, window_s: float = 0.55, max_blink_s: float = 0.45,
+                 min_blink_s: float = 0.04):
+        self.threshold = threshold
+        self.window_s = window_s
+        self.max_blink_s = max_blink_s
+        self.min_blink_s = min_blink_s
+        self._closed_since: float | None = None
+        self._last_blink_end: float | None = None
+        self.blinks = 0
+
+    def reset(self) -> None:
+        self._closed_since = None
+        self._last_blink_end = None
+
+    def update(self, t: float, both_closed: float) -> tuple[bool, bool]:
+        """Returns (blink_completed, double_blink)."""
+        off = self.threshold * 0.7
+        if self._closed_since is None:
+            if both_closed >= self.threshold:
+                self._closed_since = t
+            return False, False
+        if both_closed > off:
+            return False, False
+        dur = t - self._closed_since
+        self._closed_since = None
+        if not (self.min_blink_s <= dur <= self.max_blink_s):
+            self._last_blink_end = None
+            return False, False
+        self.blinks += 1
+        if self._last_blink_end is not None and t - self._last_blink_end <= self.window_s + dur:
+            self._last_blink_end = None
+            return True, True
+        self._last_blink_end = t
+        return True, False
+
+
 @dataclass
 class GestureEvent:
     name: str
@@ -113,10 +159,14 @@ class GestureDetector:
         self.active: dict[str, float] = {}  # name → start time
         self._candidate: dict[str, float] = {}
         self._ended: dict[str, float] = {}
+        self.blink = BlinkCounter()
+        self.blinked = False  # a complete blink finished this frame
+        self._flash: dict[str, float] = {}
 
     def reset(self) -> None:
         self.active.clear()
         self._candidate.clear()
+        self.blink.reset()
 
     def normalize(self, raw: dict[str, float]) -> dict[str, float]:
         out = {}
@@ -128,7 +178,18 @@ class GestureDetector:
     def update(self, t: float, raw: dict[str, float]) -> list[GestureEvent]:
         self.values = self.normalize(raw)
         events: list[GestureEvent] = []
+        cfg_db = self.s.gestures.get("double_blink")
+        if cfg_db is not None:
+            self.blink.threshold = cfg_db.threshold
+        self.blinked, double = self.blink.update(t, raw.get("long_blink", 0.0))
+        if double and cfg_db is not None and cfg_db.enabled:
+            events.append(GestureEvent("double_blink", "start", t))
+            events.append(GestureEvent("double_blink", "end", t))
+            self._flash["double_blink"] = t
+        self.values["double_blink"] = 1.0 if t - self._flash.get("double_blink", -9) < 0.3 else 0.0
         for name, v in self.values.items():
+            if name in EVENT_GESTURES:
+                continue
             cfg = self.s.gestures.get(name)
             if cfg is None or not cfg.enabled:
                 if name in self.active:
@@ -160,6 +221,7 @@ class GestureDetector:
         events = [GestureEvent(n, "end", t, t - s) for n, s in self.active.items()]
         self.active.clear()
         self._candidate.clear()
+        self.blink.reset()
         return events
 
 

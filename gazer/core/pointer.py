@@ -75,7 +75,7 @@ class PointerEngine:
         if hp is not None:
             self.joy.recenter(hp)
             self.absolute.recenter(hp)
-        if self.s.mode in ("head_absolute", "head_joystick"):
+        if self._last_mode in ("head_absolute", "head_joystick"):
             self.P = np.array(self.screen.center)
         self.mouse.reset()
 
@@ -98,9 +98,11 @@ class PointerEngine:
 
     # ------------------------------------------------------------- update
 
-    def update(self, t: float, feats: FaceFeatures | None, gaze_n: tuple[float, float] | None) -> PointerOutput:
-        if self.s.mode != self._last_mode:
-            self._last_mode = self.s.mode
+    def update(self, t: float, feats: FaceFeatures | None, gaze_n: tuple[float, float] | None,
+               mode: str | None = None) -> PointerOutput:
+        mode = mode or self.s.mode
+        if mode != self._last_mode:
+            self._last_mode = mode
             self.mouse.reset()
             self.joy.reset()
             self._far_since = None
@@ -123,7 +125,6 @@ class PointerEngine:
             return PointerOutput(None, gaze_px, self._scroll_update(hp, t))
 
         factor = self.s.precision_factor if self.precision else 1.0
-        mode = self.s.mode
         warped = False
 
         if mode == "gaze":

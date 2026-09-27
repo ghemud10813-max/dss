@@ -39,6 +39,7 @@ GESTURE_CATALOG: dict[str, tuple[str, float, int, str]] = {
     "wink_left": ("Wink left", 0.55, 150, "Close only your left eye"),
     "wink_right": ("Wink right", 0.55, 150, "Close only your right eye"),
     "long_blink": ("Long blink", 0.55, 700, "Close both eyes ~1 second"),
+    "double_blink": ("Double blink", 0.55, 0, "Two deliberate blinks within half a second"),
     "tilt_left": ("Tilt head left", 0.50, 250, "Ear toward left shoulder"),
     "tilt_right": ("Tilt head right", 0.50, 250, "Ear toward right shoulder"),
 }
@@ -71,6 +72,16 @@ ACTIONS: dict[str, str] = {
     "dwell_toggle": "Dwell click on/off",
     "voice_toggle": "Voice commands on/off",
     "calibrate": "Start calibration",
+    "zones_toggle": "Gaze zones on/off",
+    "key:up": "Key: Arrow up",
+    "key:down": "Key: Arrow down",
+    "hotkey:ctrl+w": "Close tab",
+    "hotkey:ctrl+t": "New tab",
+    "hotkey:alt+f4": "Close window",
+    "hotkey:ctrl+s": "Save",
+    "key:volumeup": "Volume up",
+    "key:volumedown": "Volume down",
+    "key:playpause": "Play / pause media",
     "key:enter": "Key: Enter",
     "key:esc": "Key: Escape",
     "key:backspace": "Key: Backspace",
@@ -188,6 +199,7 @@ def default_gesture_table() -> dict[str, GestureSetting]:
 
 def default_bindings() -> list[Binding]:
     return [
+        Binding("double_blink", "start", "left_click"),
         Binding("smile", "start", "left_click"),
         Binding("wink_left", "start", "left_click"),
         Binding("wink_right", "start", "right_click"),
@@ -231,6 +243,51 @@ class KeyboardSettings:
     predictions: bool = True
 
 
+ZONE_NAMES: dict[str, str] = {
+    "top_left": "Top-left corner",
+    "top": "Top edge",
+    "top_right": "Top-right corner",
+    "right": "Right edge",
+    "bottom_right": "Bottom-right corner",
+    "bottom": "Bottom edge",
+    "bottom_left": "Bottom-left corner",
+    "left": "Left edge",
+}
+
+
+def default_zone_actions() -> dict[str, str]:
+    return {
+        "top_left": "action_wheel",
+        "top": "scroll_up",
+        "top_right": "pause_toggle",
+        "right": "hotkey:alt+right",
+        "bottom_right": "keyboard_toggle",
+        "bottom": "scroll_down",
+        "bottom_left": "zoom",
+        "left": "hotkey:alt+left",
+    }
+
+
+@dataclass
+class ZoneSettings:
+    """Gaze hot-zones: look at a screen corner/edge for a moment to fire an action."""
+
+    enabled: bool = False
+    dwell_ms: int = 700
+    size: float = 0.03  # edge band, fraction of the shorter screen side (corners: 2x)
+    actions: dict[str, str] = field(default_factory=default_zone_actions)
+
+
+@dataclass
+class WellnessSettings:
+    """Eye-health assistant: blink-rate monitor and 20-20-20 breaks."""
+
+    enabled: bool = True
+    break_interval_min: float = 20.0
+    break_length_s: float = 20.0
+    low_blink_per_min: float = 8.0
+
+
 @dataclass
 class HeadCalibration:
     calibrated: bool = False
@@ -252,6 +309,18 @@ class ProfileSettings:
     keyboard: KeyboardSettings = field(default_factory=KeyboardSettings)
     voice: VoiceSettings = field(default_factory=VoiceSettings)
     head_cal: HeadCalibration = field(default_factory=HeadCalibration)
+    zones: ZoneSettings = field(default_factory=ZoneSettings)
+    wellness: WellnessSettings = field(default_factory=WellnessSettings)
+    style: str = "eyes"
+
+
+@dataclass
+class UISettings:
+    sound: bool = True
+    boot_sequence: bool = True
+    reduced_motion: bool = False
+    bloom: float = 1.0  # 0 = off
+    quality: str = "high"  # high | low
 
 
 @dataclass
@@ -274,6 +343,49 @@ class AppConfig:
     start_minimized: bool = False
     first_run_done: bool = False
     preview_landmarks: bool = True
+    port: int = 8765
+    ui: UISettings = field(default_factory=UISettings)
+
+
+CONTROL_STYLES: dict[str, tuple[str, str]] = {
+    "eyes": ("Eyes only", "Cursor follows your gaze. Click by dwelling, winking or blinking twice. "
+                          "Glance past the screen edges to scroll, go back/forward, pause or open the keyboard."),
+    "eyes_head": ("Eyes + head", "Eyes jump the cursor across the screen, small head moves place it "
+                                 "exactly. Smile or blink twice to click."),
+    "head": ("Head only", "Your head moves the cursor like a mouse. No calibration needed. "
+                          "Smile to click, raise brows to scroll."),
+}
+
+
+def apply_control_style(s: "ProfileSettings", style: str) -> None:
+    """Configure a profile for a control style (keeps unrelated settings)."""
+    g = s.gestures
+    if style == "eyes":
+        s.pointer.mode = "gaze"
+        s.pointer.gaze_smoothing = 0.7
+        s.dwell.enabled = True
+        s.dwell.time_ms = 1000
+        s.dwell.radius_px = 60
+        s.dwell.action = "left_click"
+        s.zones.enabled = True
+        g.bindings = [
+            Binding("double_blink", "start", "left_click"),
+            Binding("wink_left", "start", "left_click"),
+            Binding("wink_right", "start", "right_click"),
+            Binding("long_blink", "start", "pause_toggle"),
+            Binding("brow_raise", "hold", "action_wheel", 500),
+            Binding("smile", "start", "left_click"),
+        ]
+    elif style == "eyes_head":
+        s.pointer.mode = "hybrid"
+        s.dwell.enabled = False
+        s.zones.enabled = True
+        g.bindings = default_bindings()
+    elif style == "head":
+        s.pointer.mode = "head_mouse"
+        s.dwell.enabled = False
+        s.zones.enabled = False
+        g.bindings = default_bindings()
 
 
 # --------------------------------------------------------------------- serde
