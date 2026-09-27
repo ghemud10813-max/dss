@@ -62,6 +62,18 @@ button, input, select { font: inherit; color: inherit; }
 
 #stage { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; z-index: 0; transition: filter 1.2s var(--ease); }
 body.dim-stage #stage { filter: brightness(.55) saturate(.85); }
+body.no-webgl #stage { display: none; }
+.flat-display { position: fixed; z-index: 2; left: calc(50% + 20px); top: 47%; width: 36vw; aspect-ratio: 16 / 9; transform: translate(-50%, -50%);
+  border: 1px solid var(--line-2); background: linear-gradient(135deg, rgba(62,232,216,.05), rgba(155,124,255,.05)); pointer-events: none; }
+.flat-display .fd-label { position: absolute; top: -20px; left: 0; font-family: var(--display); font-size: 8.5px; letter-spacing: .24em; color: var(--muted); }
+.flat-display i { position: absolute; border-radius: 50%; transition: left .08s linear, top .08s linear; }
+.fd-gaze { width: 18px; height: 18px; margin: -9px 0 0 -9px; background: radial-gradient(circle, #d8ccff, rgba(155,124,255,0) 70%); }
+.fd-ptr { width: 30px; height: 30px; margin: -15px 0 0 -15px; border: 2px dashed var(--muted); animation: spin 4s linear infinite; }
+.fd-ptr.on { border-color: var(--cyan); box-shadow: 0 0 14px var(--cyan-glow); }
+body.no-webgl { background:
+  linear-gradient(rgba(62,232,216,.05) 1px, transparent 1px) 0 0 / 48px 48px,
+  linear-gradient(90deg, rgba(62,232,216,.05) 1px, transparent 1px) 0 0 / 48px 48px,
+  radial-gradient(ellipse at 50% 45%, #0d2230 0%, #03060a 70%); }
 #fx-vignette { position: fixed; inset: 0; pointer-events: none; z-index: 1;
   background: radial-gradient(ellipse at center, transparent 45%, rgba(0,0,0,.72) 100%); }
 #fx-scan { position: fixed; inset: 0; pointer-events: none; z-index: 60; opacity: .07;

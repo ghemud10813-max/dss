@@ -5,18 +5,19 @@ from __future__ import annotations
 from PyQt6.QtCore import QPointF, QRectF, Qt
 from PyQt6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap, QRadialGradient
 
-BG = "#0e1116"
-SURFACE = "#161a21"
-SURFACE_2 = "#1d222b"
-SURFACE_3 = "#252b36"
-BORDER = "#2a313c"
-TEXT = "#e7eaf0"
-MUTED = "#8a94a6"
-ACCENT = "#3dd6c6"
-ACCENT_2 = "#8b7bff"
-OK = "#3ddc84"
-WARN = "#ffb454"
-DANGER = "#ff5d6c"
+# Shared with the web Command Deck (gazer/web/css/app.css).
+BG = "#03060a"
+SURFACE = "#08111a"
+SURFACE_2 = "#0c1a24"
+SURFACE_3 = "#12283a"
+BORDER = "#1b3a44"
+TEXT = "#dcf5f2"
+MUTED = "#6f8796"
+ACCENT = "#3ee8d8"
+ACCENT_2 = "#9b7cff"
+OK = "#4dffa6"
+WARN = "#ffb547"
+DANGER = "#ff4d6a"
 
 STYLESHEET = f"""
 * {{ font-family: "Segoe UI", "Inter", sans-serif; font-size: 13px; color: {TEXT}; }}

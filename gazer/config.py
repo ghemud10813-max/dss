@@ -226,7 +226,7 @@ class OverlaySettings:
     show_dwell_ring: bool = True
     show_toasts: bool = True
     click_ripple: bool = True
-    accent: str = "#3dd6c6"
+    accent: str = "#3ee8d8"
 
 
 @dataclass

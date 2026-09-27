@@ -17,7 +17,36 @@ import { buildSystem } from "./views/system.js";
 
 const CALIB_ONLY = location.hash === "#calib";
 const app = document.getElementById("app");
-const stage = new Stage(document.getElementById("stage"));
+// The 3D stage is eye candy: if WebGL is unavailable (old GPU, remote desktop,
+// locked-down browser) every control keeps working on a CSS backdrop.
+class NullStage {
+  constructor() {
+    this.anchors = {};
+    this.paused = false;
+    this.el = h("div", { class: "flat-display" }, h("div", { class: "fd-label" }, "VIRTUAL DISPLAY · 2D MODE"));
+    this.gaze = h("i", { class: "fd-gaze" });
+    this.ptr = h("i", { class: "fd-ptr" });
+    this.el.append(this.gaze, this.ptr);
+    document.body.append(this.el);
+  }
+  setFrame(f) {
+    const place = (el, p) => { el.style.display = p ? "" : "none"; if (p) { el.style.left = `${p[0] * 100}%`; el.style.top = `${p[1] * 100}%`; } };
+    place(this.gaze, f.face ? f.gaze : null);
+    place(this.ptr, f.pointer);
+    this.ptr.classList.toggle("on", !!f.control);
+  }
+  setView(v) { this.el.style.display = v === "deck" ? "" : "none"; }
+  setMeshTopology() {} setHeat() {} setQuality() {} render() {}
+}
+let stage;
+try {
+  stage = new Stage(document.getElementById("stage"));
+} catch (e) {
+  console.warn("3D stage disabled:", e.message);
+  stage = new NullStage();
+  document.body.classList.add("no-webgl");
+  setTimeout(() => showToast("3D disabled — WebGL unavailable; all controls still work", "warn"), 1500);
+}
 fetch("/assets/face_mesh.json").then((r) => r.json()).then((m) => stage.setMeshTopology(m)).catch(() => {});
 
 // ----------------------------------------------------------------- context
@@ -227,7 +256,7 @@ on("frame", (f) => {
   }
   if (f.calib) {
     sawCalib = true;
-    if (!isCalibrating() && (CALIB_ONLY || !store.state?.app.native_ui)) {
+    if (!isCalibrating() && (CALIB_ONLY || !store.state?.app.native_calib)) {
       stage.paused = true;
       openCalibration({ native: CALIB_ONLY, closeCb: () => { stage.paused = false; } });
     }

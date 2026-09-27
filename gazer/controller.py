@@ -579,6 +579,7 @@ class Controller:
                 "version": __version__, "demo": self.demo, "virtual_input": self.virtual_input,
                 "platform": platform.system(), "camera": self.camera_status,
                 "source": getattr(self.runner.source, "name", ""), "native_ui": self.ui is not None,
+                "native_calib": bool(self.ui is not None and getattr(self.ui, "view_cls", None)),
                 "uptime": time.time() - self.started,
             },
             "config": config_to_patchable(self.config),

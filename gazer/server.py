@@ -219,6 +219,7 @@ class Hub:
         await ws.prepare(request)
         client = Client(ws)
         self.clients.add(client)
+        log.info("Command Deck connected (%d client%s)", len(self.clients), "" if len(self.clients) == 1 else "s")
         try:
             await ws.send_json({"type": "hello", "catalog": self.ctl.catalog(), "token_ok": True})
             await ws.send_json({"type": "state", "state": self.ctl.state()})

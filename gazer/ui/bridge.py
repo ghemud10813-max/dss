@@ -1,12 +1,10 @@
-"""Qt bridge around the engine plus physical↔logical screen mapping."""
+"""Physical (OS input) ↔ logical (Qt) screen mapping."""
 
 from __future__ import annotations
 
-from PyQt6.QtCore import QObject, QPointF, QRectF, pyqtSignal
+from PyQt6.QtCore import QPointF, QRectF
 from PyQt6.QtGui import QGuiApplication, QScreen
 
-from gazer.config import AppConfig
-from gazer.core.engine import EngineCore, EngineRunner, Snapshot
 from gazer.core.screen import ScreenRect, list_monitors
 
 
@@ -54,27 +52,3 @@ def pick_qscreen(index: int) -> QScreen:
     primary = QGuiApplication.primaryScreen()
     ordered = [primary] + [s for s in screens if s is not primary]
     return ordered[index] if 0 <= index < len(ordered) else primary
-
-
-class EngineBridge(QObject):
-    snapshot = pyqtSignal(object)
-    status = pyqtSignal(str)
-
-    def __init__(self, config: AppConfig, core: EngineCore):
-        super().__init__()
-        self.core = core
-        self.runner = EngineRunner(config, core, self.snapshot.emit, self.status.emit)
-        self.last: Snapshot | None = None
-        self.snapshot.connect(self._keep)
-
-    def _keep(self, snap: Snapshot) -> None:
-        self.last = snap
-
-    def post(self, fn) -> None:
-        self.runner.post(fn)
-
-    def start(self) -> None:
-        self.runner.start()
-
-    def stop(self) -> None:
-        self.runner.stop()

@@ -66,13 +66,14 @@ class GazeKeyboard(QWidget):
                             | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowDoesNotAcceptFocus)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.setStyleSheet(f"""
-            QWidget#KB {{ background: {theme.BG}; border-top: 1px solid {theme.BORDER}; }}
-            QPushButton {{ font-size: 22px; font-weight: 600; border-radius: 10px; background: {theme.SURFACE_2};
-                           border: 1px solid {theme.BORDER}; }}
-            QPushButton:hover {{ background: {theme.SURFACE_3}; border-color: {theme.ACCENT}; }}
-            QPushButton#Pred {{ font-size: 18px; color: {theme.ACCENT}; background: {theme.SURFACE}; }}
-            QPushButton#Mod:checked {{ background: {theme.ACCENT}; color: #06201d; }}
-            QPushButton#Hide {{ color: {theme.DANGER}; }}
+            QWidget#KB {{ background: {theme.BG}; border-top: 2px solid {theme.ACCENT}; }}
+            QPushButton {{ font-family: "Segoe UI", sans-serif; font-size: 22px; font-weight: 600; color: {theme.TEXT};
+                           border-radius: 2px; background: {theme.SURFACE}; border: 1px solid {theme.BORDER}; }}
+            QPushButton:hover {{ background: {theme.SURFACE_3}; border: 1px solid {theme.ACCENT}; color: #ffffff; }}
+            QPushButton:pressed {{ background: {theme.ACCENT}; color: #021a18; }}
+            QPushButton#Pred {{ font-size: 19px; color: {theme.ACCENT}; background: #050d14; border: 1px solid #16424a; }}
+            QPushButton#Mod:checked {{ background: {theme.ACCENT}; color: #021a18; }}
+            QPushButton#Hide {{ color: {theme.DANGER}; border-color: #5a2a31; }}
         """)
         self.setObjectName("KB")
         root = QVBoxLayout(self)
