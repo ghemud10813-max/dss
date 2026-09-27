@@ -1,1 +1,63 @@
-<!doctype html><title>stub</title>
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gazer Command Deck</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cpath d='M4 32Q32 2 60 32Q32 62 4 32Z' fill='%2304070b' stroke='%233ee8d8' stroke-width='4'/%3E%3Ccircle cx='32' cy='32' r='11' fill='%239a7bff'/%3E%3Ccircle cx='32' cy='32' r='4' fill='%2304070b'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/static/css/app.css">
+<script type="importmap">
+{ "imports": {
+  "three": "/static/vendor/three/three.module.min.js",
+  "three/addons/": "/static/vendor/three/addons/"
+} }
+</script>
+</head>
+<body>
+<canvas id="stage" aria-hidden="true"></canvas>
+<div id="fx-vignette" aria-hidden="true"></div>
+<div id="fx-scan" aria-hidden="true"></div>
+<div id="fx-grain" aria-hidden="true"></div>
+
+<div id="app" class="booting">
+  <header id="topbar">
+    <div class="brand">
+      <svg class="brand-eye" viewBox="0 0 64 40" aria-hidden="true">
+        <path class="lid" d="M2 20Q32 -6 62 20Q32 46 2 20Z"/>
+        <circle class="iris" cx="32" cy="20" r="9"/>
+        <circle class="pupil" cx="32" cy="20" r="3.6"/>
+      </svg>
+      <div class="brand-text">
+        <div class="brand-name" data-text="GAZER">GAZER</div>
+        <div class="brand-sub">NEURAL OCULAR INTERFACE</div>
+      </div>
+    </div>
+    <div id="chips" class="chips"></div>
+    <div class="top-actions">
+      <label class="profile-pick"><span>PILOT</span><select id="profile-select" aria-label="Profile"></select></label>
+      <button id="btn-sound" class="icon-btn" title="Sound" aria-label="Toggle sound"></button>
+      <button id="btn-full" class="icon-btn" title="Fullscreen" aria-label="Toggle fullscreen"></button>
+    </div>
+  </header>
+
+  <nav id="rail" aria-label="Sections"></nav>
+
+  <main id="views"></main>
+
+  <div id="callouts" aria-hidden="true"></div>
+  <div id="toasts" role="status" aria-live="polite"></div>
+</div>
+
+<div id="calib-layer" hidden></div>
+<div id="modal-layer" hidden></div>
+<div id="boot" hidden></div>
+<div id="offline" hidden>
+  <div class="offline-box">
+    <div class="offline-title">LINK LOST</div>
+    <div class="offline-sub">Reconnecting to the Gazer engine…</div>
+  </div>
+</div>
+
+<script type="module" src="/static/js/main.js"></script>
+</body>
+</html>

@@ -346,3 +346,28 @@ class SyntheticUser:
             for i in _IRIS_A[:1] + _IRIS_B[:1]:
                 cv2.circle(img, tuple(p[i]), 6, (200, 230, 60), 1, cv2.LINE_AA)
         return img
+
+
+def synthetic_calibration(seed: int = 11, rows: int = 5, cols: int = 5, fps: float = 30.0):
+    """Calibration data from a simulated user looking at a grid (demo mode).
+
+    Returns (X, Y) gaze vectors and normalized targets, collected the same way
+    a real calibration does (settle time, blink rejection)."""
+    from gazer.core.calibration import grid
+    from gazer.core.features import extract_features
+
+    user = SyntheticUser(seed=seed, expressive=False)
+    t = 0.0
+    X, Y = [], []
+    for target in grid(rows, cols, 0.05) * 2:
+        user.attend(target)
+        for k in range(int(1.4 * fps)):
+            t += 1.0 / fps
+            obs = user.step(t)
+            if obs is None or k < int(0.45 * fps):
+                continue
+            f = extract_features(obs)
+            if min(f.left.aperture, f.right.aperture) > 0.12:
+                X.append(f.gaze_vector)
+                Y.append(target)
+    return np.asarray(X), np.asarray(Y, dtype=np.float64)

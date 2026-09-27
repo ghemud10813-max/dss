@@ -117,6 +117,8 @@ class Controller:
         return prof
 
     def start(self) -> None:
+        if self.demo and not self.profile.gaze.ready:
+            self._demo_pretrain()
         self.runner.start()
         if self.config.hotkeys.enabled and not self.demo:
             self.hotkeys.start()
@@ -124,6 +126,16 @@ class Controller:
             self.set_voice(True)
         self._saver = threading.Thread(target=self._autosave, name="gazer-save", daemon=True)
         self._saver.start()
+
+    def _demo_pretrain(self) -> None:
+        """Demo mode starts with eyes already calibrated, so gaze control and
+        the 3D gaze rays are live immediately (calibration can still be run)."""
+        from gazer.core.simulator import synthetic_calibration
+
+        X, Y = synthetic_calibration()
+        rep = self.profile.gaze.fit(X, Y)
+        self.profile.add_calibration("demo", len(X), rep.rmse * self.core.screen.width, "Excellent")
+        self.mark_dirty()
 
     def stop(self) -> None:
         self._stop.set()

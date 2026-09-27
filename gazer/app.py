@@ -93,6 +93,12 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     if args.data_dir:
         os.environ["GAZER_DATA_DIR"] = args.data_dir
+    elif args.demo:
+        # Keep the simulated pilot's profile away from real profiles: a gaze
+        # model trained on the simulator would be useless on a real face.
+        from gazer.paths import data_dir
+
+        os.environ["GAZER_DATA_DIR"] = str(data_dir() / "demo")
     _setup_logging(args.verbose)
     if args.web:
         return run_web(args)
