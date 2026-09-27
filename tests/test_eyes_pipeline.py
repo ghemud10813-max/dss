@@ -87,7 +87,7 @@ def test_eyes_only_cursor_follows_gaze_and_double_blink_clicks(tmp_path):
     errors = []
     for target in [(0.25, 0.3), (0.75, 0.35), (0.5, 0.7), (0.2, 0.75)]:
         rig.user.attend(target)
-        for i in range(40):
+        for _ in range(40):
             snap = rig.step()
         assert snap.mode_effective == "gaze"
         p = np.array(snap.pointer)

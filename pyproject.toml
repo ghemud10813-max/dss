@@ -1,8 +1,39 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "gazer"
-version = "2.0.0"
-description = "Hands-free computer control with your eyes, head, face and voice"
+version = "3.0.0"
+description = "Control your whole computer with your eyes — gaze cursor, blink/dwell clicks, gaze zones, gaze keyboard — with a cinematic 3D Command Deck"
+readme = "README.md"
 requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+    "opencv-python>=4.8",
+    "mediapipe>=0.10.14",
+    "aiohttp>=3.9",
+    "pynput>=1.7.6",
+    "screeninfo>=0.8.1",
+]
+
+[project.optional-dependencies]
+desktop = ["PyQt6>=6.5", "PyQt6-WebEngine>=6.5"]
+voice = ["vosk>=0.3.45", "sounddevice>=0.4.6"]
+dev = ["pytest>=7", "ruff>=0.4", "playwright>=1.40"]
+
+[project.scripts]
+gazer = "gazer.app:main"
+
+[tool.setuptools.packages.find]
+include = ["gazer*"]
+
+[tool.setuptools.package-data]
+gazer = ["assets/*.json", "web/*.html", "web/css/*", "web/js/*.js", "web/js/views/*.js", "web/fonts/*",
+         "web/vendor/three/*", "web/vendor/three/addons/*/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120

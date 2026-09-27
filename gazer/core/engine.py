@@ -667,7 +667,13 @@ class EngineRunner:
             if self._restart:
                 self._restart = False
                 if not self._open_source():
-                    self._sleep_or_stop(2.0)
+                    # keep the UI alive (face lost, status visible) while retrying
+                    for _ in range(8):
+                        snap = self.core.process(time.perf_counter(), None)
+                        snap.source = "offline"
+                        self._emit(snap)
+                        self._sleep_or_stop(0.25)
+                        self._drain_commands()
                     self._restart = True
                     continue
             assert self.source is not None

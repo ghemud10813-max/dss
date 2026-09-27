@@ -156,7 +156,7 @@ class Hub:
             self.loop.call_soon_threadsafe(self.loop.stop)
         if self._thread:
             self._thread.join(timeout=3)
-        self._pool.shutdown(wait=False)
+        self._pool.shutdown(wait=False, cancel_futures=True)
 
     async def _shutdown(self) -> None:
         for c in list(self.clients):

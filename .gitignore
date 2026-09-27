@@ -6,3 +6,5 @@ __pycache__/
 profiles/
 .pytest_cache/
 *.egg-info/
+*.task
+.venv/
