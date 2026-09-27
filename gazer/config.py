@@ -466,3 +466,51 @@ def save_json(obj: Any, path: Path) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(to_dict(obj), indent=2), encoding="utf-8")
     tmp.replace(path)
+
+
+def config_to_patchable(obj: Any) -> Any:
+    return to_dict(obj)
+
+
+def set_path(root: Any, path: str, value: Any) -> None:
+    """Set a nested setting by dotted path with type checking, e.g.
+    ``pointer.gaze_smoothing`` or ``gestures.gestures.smile.threshold`` or
+    ``zones.actions.top``. Raises ValueError on unknown paths / bad types."""
+    parts = [p for p in path.split(".") if p]
+    if not parts:
+        raise ValueError("empty path")
+    obj = root
+    for i, key in enumerate(parts):
+        last = i == len(parts) - 1
+        if is_dataclass(obj):
+            hints = typing.get_type_hints(type(obj))
+            if key not in hints or key.startswith("_"):
+                raise ValueError(f"unknown setting {'.'.join(parts[:i + 1])}")
+            if last:
+                try:
+                    setattr(obj, key, _coerce(hints[key], value))
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(f"bad value for {path}: {exc}") from exc
+                return
+            obj = getattr(obj, key)
+        elif isinstance(obj, dict):
+            if key not in obj:
+                raise ValueError(f"unknown key {'.'.join(parts[:i + 1])}")
+            if last:
+                cur = obj[key]
+                if is_dataclass(cur):
+                    obj[key] = from_dict(type(cur), value)
+                elif isinstance(cur, bool) or isinstance(value, bool):
+                    if not isinstance(value, bool) or not isinstance(cur, bool):
+                        raise ValueError(f"bad value for {path}")
+                    obj[key] = value
+                elif isinstance(cur, (int, float)) and isinstance(value, (int, float)):
+                    obj[key] = type(cur)(value)
+                elif isinstance(cur, str) and isinstance(value, str):
+                    obj[key] = value
+                else:
+                    raise ValueError(f"bad value for {path}")
+                return
+            obj = obj[key]
+        else:
+            raise ValueError(f"cannot descend into {'.'.join(parts[:i])}")
