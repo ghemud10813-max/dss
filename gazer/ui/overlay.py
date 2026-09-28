@@ -160,6 +160,11 @@ class Overlay(QWidget):
                 rects.append(QRectF(c.x() - 90, c.y() - 90, 180, 180))
             if snap.zone:
                 rects.append(self._zone_rect(snap.zone[0]).adjusted(-40, -40, 40, 40))
+            if snap.target is not None:
+                t = snap.target
+                rects.append(self.mapper.rect_to_local((t.x, t.y, t.w, t.h)).adjusted(-30, -34, 30, 20))
+            if snap.dwell_next and c is not None:
+                rects.append(QRectF(c.x() - 80, c.y() + 26, 160, 30))
         if self._zone_flash:
             rects.append(self._zone_rect(self._zone_flash[0]).adjusted(-40, -40, 40, 40))
         for pos, _ in self.ripples:
@@ -203,6 +208,8 @@ class Overlay(QWidget):
         if snap and snap.control and not snap.calibrating:
             if snap.zone:
                 self._paint_zone(p, snap.zone[0], snap.zone[1], accent)
+            if snap.target is not None and not snap.paused:
+                self._paint_target(p, snap.target, t, accent)
             if snap.zoom is not None:
                 self._paint_zoom(p, snap)
             c = self._cursor_local()
@@ -219,6 +226,8 @@ class Overlay(QWidget):
                     self._paint_reticle(p, c, t, snap, accent)
                 if snap.dwell_enabled and snap.dwell_progress > 0.02 and self.s.show_dwell_ring:
                     self._paint_dwell(p, c, snap.dwell_progress)
+            if snap.dwell_next and c is not None and not snap.paused:
+                self._paint_click_type(p, c, snap.dwell_next)
             if snap.scrolling and c is not None:
                 self._paint_scroll(p, c, snap)
             if snap.wheel is not None:
@@ -272,6 +281,42 @@ class Overlay(QWidget):
             p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(QColor(255, 181, 71, 110))
             p.drawEllipse(c, r * 0.55, r * 0.55)
+
+    def _paint_target(self, p: QPainter, target, t: float, accent: QColor) -> None:
+        """Target lock: HUD corner brackets that breathe around the locked element."""
+        r = self.mapper.rect_to_local((target.x, target.y, target.w, target.h))
+        pad = 5 + 2.5 * math.sin(t * 6)
+        r = r.adjusted(-pad, -pad, pad, pad)
+        L = min(16.0, r.width() / 3, r.height() / 2)
+        glow = QColor(accent)
+        glow.setAlpha(60)
+        for width, col in ((6, glow), (2.2, QColor(accent))):
+            p.setPen(QPen(col, width, Qt.PenStyle.SolidLine, Qt.PenCapStyle.SquareCap))
+            for (x, y, dx, dy) in ((r.left(), r.top(), 1, 1), (r.right(), r.top(), -1, 1),
+                                   (r.left(), r.bottom(), 1, -1), (r.right(), r.bottom(), -1, -1)):
+                p.drawLine(QPointF(x, y), QPointF(x + dx * L, y))
+                p.drawLine(QPointF(x, y), QPointF(x, y + dy * L))
+        label = (target.name or target.kind).upper()[:28]
+        p.setFont(_font(7.5))
+        w = p.fontMetrics().horizontalAdvance(label) + 14
+        box = QRectF(r.left(), r.top() - 20, w, 16)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(4, 12, 18, 220))
+        p.drawRect(box)
+        p.setPen(QColor(accent))
+        p.drawText(box, Qt.AlignmentFlag.AlignCenter, label)
+
+    def _paint_click_type(self, p: QPainter, c: QPointF, action: str) -> None:
+        label = {"right_click": "RIGHT CLICK", "double_click": "DOUBLE CLICK", "drag_toggle": "DRAG",
+                 "zoom_click": "PRECISE", "middle_click": "MIDDLE"}.get(action, ACTIONS.get(action, action).upper())
+        p.setFont(_font(7.5))
+        w = p.fontMetrics().horizontalAdvance(label) + 16
+        box = QRectF(c.x() - w / 2, c.y() + 30, w, 18)
+        p.setPen(QPen(QColor(theme.WARN), 1))
+        p.setBrush(QColor(20, 12, 2, 225))
+        p.drawRect(box)
+        p.setPen(QColor(theme.WARN))
+        p.drawText(box, Qt.AlignmentFlag.AlignCenter, label)
 
     def _paint_dwell(self, p: QPainter, c: QPointF, progress: float) -> None:
         rect = QRectF(c.x() - 27, c.y() - 27, 54, 54)

@@ -25,11 +25,13 @@ from gazer.config import AppConfig, CameraSettings
 from gazer.core.features import FaceFeatures, extract_features
 from gazer.core.gestures import BindingResolver, EyeClosure, GestureDetector, raw_gesture_values
 from gazer.core.input_backend import InputBackend
+from gazer.core.lighting import analyze as analyze_lighting
 from gazer.core.interaction import ActionWheel, DwellDetector, Rect, WheelView, ZoomLens, ZoomView
 from gazer.core.pointer import GAZE_MODES, MODE_ORDER, PointerEngine
 from gazer.core.profiles import Profile
 from gazer.core.screen import ScreenRect
 from gazer.core.sources import CameraSource, FrameSource
+from gazer.core.targets import Target, TargetSnapper
 from gazer.core.zones import ZoneDetector
 
 log = logging.getLogger("gazer.engine")
@@ -37,6 +39,9 @@ log = logging.getLogger("gazer.engine")
 CLICK_ACTIONS = {"left_click": ("left", 1), "right_click": ("right", 1), "double_click": ("left", 2),
                  "middle_click": ("middle", 1)}
 ALWAYS_ALLOWED = {"pause_toggle", "resume", "stop"}
+# Dwell click types that stay armed until their two-step action completes.
+TWO_STEP = {"drag_toggle", "zoom_click"}
+LEARN_MAX_TARGET_PX = 160  # only small targets are precise enough to learn from
 
 
 @dataclass
@@ -66,6 +71,8 @@ class Snapshot:
     features: FaceFeatures | None = None
     quality: float = 0.0
     zone: tuple[str, float] | None = None  # (zone name, dwell progress)
+    target: Target | None = None  # magnetic lock (physical px)
+    dwell_next: str | None = None  # one-shot click type chosen in the Eye Dock
     zones_enabled: bool = False
     blinked: bool = False
     events: list[tuple] = field(default_factory=list)
@@ -77,6 +84,7 @@ class Snapshot:
     preview: np.ndarray | None = None
     mesh: np.ndarray | None = None  # (478, 3) face-centred, y up, ~unit face width
     source: str = ""
+    lighting: dict | None = None  # periodic lighting report from the runner
 
 
 class CursorOutput:
@@ -183,6 +191,12 @@ class EngineCore:
         self._scroll_started = 0.0
         self._t = 0.0
         self._active_since: float | None = None
+        self.snapper: TargetSnapper | None = None
+        self.target: Target | None = None
+        self._target_seen = 0.0
+        self.dwell_next: str | None = None
+        self.dwell_exclusions: list[tuple[float, float, float, float]] = []  # physical x, y, w, h
+        self.bindings: BindingResolver | None = None
         self.bind_profile(profile)
 
     # ------------------------------------------------------------ profile
@@ -195,6 +209,8 @@ class EngineCore:
         self.gestures = GestureDetector(s.gestures)
         self.bindings = BindingResolver(s.gestures.bindings)
         self.dwell = DwellDetector()
+        self.target = None
+        self.dwell_next = None
         self.zones = ZoneDetector(s.zones, self.screen.width / max(self.screen.height, 1))
         self.reload_settings()
 
@@ -205,7 +221,11 @@ class EngineCore:
         self.pointer.set_calibration(s.head_cal)
         self.pointer.apply_settings()
         self.gestures.s = s.gestures
-        self.bindings = BindingResolver(s.gestures.bindings)
+        if self.bindings is None or self.bindings.bindings is not s.gestures.bindings:
+            # only rebuild when the list changed, so a gesture held right now isn't dropped
+            self.bindings = BindingResolver(s.gestures.bindings)
+        if self.snapper is not None:
+            self.snapper.radius = s.pointer.magnetic_radius_px
         self.dwell.radius = s.dwell.radius_px
         self.dwell.dwell_s = s.dwell.time_ms / 1000
         self.dwell.cooldown_s = s.dwell.cooldown_ms / 1000
@@ -279,6 +299,23 @@ class EngineCore:
         self.zoom = None
         self.dwell.reset()
         self.zones.reset()
+        self.target = None
+        self.set_dwell_next(None)
+
+    def set_dwell_next(self, action: str | None) -> None:
+        """Choose what the next dwell does (Eye Dock). None = the profile default."""
+        if action == self.dwell_next:
+            return
+        self.dwell_next = action
+        self._events.append(("dwell_next", action))
+
+    def magnetic_on(self, mode: str | None = None) -> bool:
+        s = self.profile.settings.pointer
+        return (s.magnetic and self.snapper is not None and self.snapper.available
+                and (mode or self.effective_mode) == "gaze")
+
+    def _excluded(self, p) -> bool:
+        return any(x <= p[0] < x + w and y <= p[1] < y + h for x, y, w, h in self.dwell_exclusions)
 
     def _on_manual(self, pos) -> None:
         self.pointer.sync(pos)
@@ -344,6 +381,7 @@ class EngineCore:
             features=feats, quality=feats.quality if feats else 0.0,
             zone=(self.zones.current, self.zones.progress) if self.zones.current else None,
             zones_enabled=s.zones.enabled, blinked=self.gestures.blinked,
+            target=self.target if self.active else None, dwell_next=self.dwell_next,
             events=self._drain_events(),
         )
 
@@ -360,7 +398,7 @@ class EngineCore:
         for action in self.zones.update(t, p):
             if self.active or action in ALWAYS_ALLOWED:
                 self._events.append(("zone", self.zones.current, action))
-                self.perform(action)
+                self.perform(action, "zone")
 
     def _drain_events(self) -> list[tuple]:
         ev, self._events = self._events, []
@@ -385,6 +423,7 @@ class EngineCore:
                 self._close_wheel()
             return
         if self.zoom is not None:
+            self.target = None
             lens_p = self.zoom.clamp_to_lens(out.pos)
             self.pointer.P = lens_p.copy()
             self.zoom.pointer = lens_p
@@ -393,12 +432,42 @@ class EngineCore:
                 self._close_zoom()
                 return
         else:
-            self.output.set_target(out.pos)
-        if s.dwell.enabled and feats is not None and self.zones.current is None:
+            self._magnetize(t, out.pos)
+            self.output.set_target(self.pointer.P)
+        dwell_ok = s.dwell.enabled or self.dwell_next is not None
+        if s.dwell.targets_only and self.zoom is None and self.target is None and self.magnetic_on():
+            dwell_ok = False  # reading plain text never clicks
+        if dwell_ok and feats is not None and self.zones.current is None and not self._excluded(self.pointer.P):
             if self.dwell.update(t, self.pointer.P):
-                self.perform(s.dwell.action if s.dwell.action != "none" else "left_click")
+                default = s.dwell.action if s.dwell.action != "none" else "left_click"
+                action = self.dwell_next or default
+                self.perform(action)
+                two_step_pending = (action == "drag_toggle" and self.dragging) or \
+                                   (action == "zoom_click" and self.zoom is not None)
+                if self.dwell_next is not None and not two_step_pending:
+                    self.set_dwell_next(None)
         else:
             self.dwell.reset()
+
+    def _magnetize(self, t: float, gaze_pos) -> None:
+        """Lock the cursor onto the interactive element nearest the gaze."""
+        if not self.magnetic_on():
+            self.target = None
+            return
+        x, y = float(gaze_pos[0]), float(gaze_pos[1])
+        self.snapper.request(x, y)
+        lock = self.snapper.lock_for(x, y)
+        prev = self.target
+        if lock is None and prev is not None and t - self._target_seen < 0.6 \
+                and prev.distance(x, y) <= self.snapper.radius * 1.4:
+            lock = prev  # hysteresis: don't flicker off between lookups
+        elif lock is not None:
+            self._target_seen = t
+        if lock is not None and lock != prev:
+            self.dwell.reset()
+        self.target = lock
+        if lock is not None:
+            self.pointer.P = np.array(lock.center, dtype=np.float64)
 
     # ------------------------------------------------------------ actions
 
@@ -407,7 +476,8 @@ class EngineCore:
             if self.dragging:
                 self._drag(False)
             return
-        if not self.control and action not in ("calibrate", "keyboard_toggle", "voice_toggle"):
+        if not self.control and action not in ("calibrate", "keyboard_toggle", "voice_toggle", "dock_toggle",
+                                               "trainer"):
             return
         if self.paused and action not in ALWAYS_ALLOWED:
             return
@@ -443,7 +513,8 @@ class EngineCore:
                 self._scroll_started = self._t
                 self._toast("Scroll mode — move head up/down")
         elif action in ("scroll_up", "scroll_down"):
-            self.backend.scroll(360 if action == "scroll_up" else -360)
+            step = 120 if phase == "zone" else 360  # zones repeat fast, so one notch each
+            self.backend.scroll(step if action == "scroll_up" else -step)
         elif action == "action_wheel":
             if self.wheel is not None:
                 self._close_wheel()
@@ -454,6 +525,12 @@ class EngineCore:
                 self._close_zoom()
             else:
                 self._open_zoom()
+        elif action == "zoom_click":
+            # two-step precise click: first magnify, then click inside the lens
+            if self.zoom is None:
+                self._open_zoom()
+            else:
+                self._click("left", 1)
         elif action == "pause_toggle":
             self.set_paused(not self.paused)
         elif action == "pause":
@@ -478,11 +555,13 @@ class EngineCore:
             z = self.profile.settings.zones
             z.enabled = not z.enabled
             self._toast("Gaze zones on" if z.enabled else "Gaze zones off")
+            self._events.append(("settings", "zones.enabled"))
         elif action == "dwell_toggle":
             d = self.profile.settings.dwell
             d.enabled = not d.enabled
             self._toast("Dwell click on" if d.enabled else "Dwell click off")
-        elif action in ("keyboard_toggle", "voice_toggle", "calibrate"):
+            self._events.append(("settings", "dwell.enabled"))
+        elif action in ("keyboard_toggle", "voice_toggle", "calibrate", "dock_toggle", "trainer"):
             self.requests.append((action, None))
         elif action.startswith("key:"):
             self.backend.tap(action[4:])
@@ -509,6 +588,10 @@ class EngineCore:
         if self.zoom is not None:
             target = self.zoom.to_real(self.zoom.pointer)
             self._close_zoom(sync_to=target)
+            learn = True
+        elif self.target is not None and max(self.target.w, self.target.h) <= LEARN_MAX_TARGET_PX:
+            # Magnetic lock: the element centre is a better label than the gaze estimate itself.
+            target = np.array(self.target.center)
             learn = True
         else:
             target = np.array(self.pointer.P)
@@ -612,6 +695,7 @@ class EngineRunner:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._restart = True
+        self._last_light = 0.0
         self.camera_ok = False
 
     def post(self, fn: Callable[[EngineCore], None]) -> None:
@@ -710,6 +794,16 @@ class EngineRunner:
             snap.source = self.source.name
             if obs is not None and self.want_mesh:
                 snap.mesh = normalized_mesh(obs.points)
+            if frame.image is not None and obs is not None and now - self._last_light > 1.0:
+                self._last_light = now
+                try:
+                    small = cv2.resize(frame.image, (160, int(160 * frame.image.shape[0] / frame.image.shape[1])),
+                                       interpolation=cv2.INTER_AREA)
+                    k = 160 / frame.image.shape[1]
+                    gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+                    snap.lighting = analyze_lighting(gray, obs.points[:, :2] * k).as_dict()
+                except Exception:
+                    log.exception("lighting")
             if self.want_preview and frame.image is not None:
                 img = frame.image
                 h, w = img.shape[:2]

@@ -13,7 +13,7 @@ import signal
 import sys
 import webbrowser
 
-from PyQt6.QtCore import QObject, QTimer, QUrl, pyqtSignal
+from PyQt6.QtCore import QObject, QPointF, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import QAction, QGuiApplication
 from PyQt6.QtWidgets import QApplication, QMainWindow, QMenu, QSystemTrayIcon
 
@@ -21,6 +21,7 @@ from gazer import APP_NAME
 from gazer.core.engine import Snapshot
 from gazer.ui import theme
 from gazer.ui.bridge import ScreenMapper, pick_qscreen
+from gazer.ui.eyedock import EyeDock
 from gazer.ui.keyboard import GazeKeyboard
 from gazer.ui.overlay import Overlay
 
@@ -50,6 +51,12 @@ class DeckWindow(QMainWindow):
         self.view.setUrl(QUrl(url))
         self.setCentralWidget(self.view)
         self._on_close = on_close
+        # let the deck go fullscreen (Gaze Trainer, browser-style calibration)
+        self.view.page().fullScreenRequested.connect(self._fullscreen)
+
+    def _fullscreen(self, request) -> None:
+        request.accept()
+        self.showFullScreen() if request.toggleOn() else self.showNormal()
 
     def closeEvent(self, e):
         # Closing the deck hides it; the tray keeps Gazer running.
@@ -91,6 +98,7 @@ class DesktopUI(QObject):
 
     sig_frame = pyqtSignal(object)
     sig_keyboard = pyqtSignal()
+    sig_dock = pyqtSignal()
     sig_calib_open = pyqtSignal()
     sig_calib_close = pyqtSignal()
     sig_screen = pyqtSignal()
@@ -106,12 +114,14 @@ class DesktopUI(QObject):
         self.deck: DeckWindow | None = None
         self.calib_win: CalibrationWindow | None = None
         self.keyboard: GazeKeyboard | None = None
+        self.dock: EyeDock | None = None
         qs = pick_qscreen(ctl.config.screen_index)
         self.mapper = ScreenMapper(qs)
         self.overlay = Overlay(self.mapper, lambda: self.ctl.profile.settings.overlay,
                                follow_os_cursor=not ctl.virtual_input)
         self.sig_frame.connect(self._frame)
         self.sig_keyboard.connect(self._toggle_keyboard)
+        self.sig_dock.connect(self._sync_dock)
         self.sig_calib_open.connect(self._open_calibration)
         self.sig_calib_close.connect(self._close_calibration)
         self.sig_screen.connect(self._screen_changed)
@@ -123,6 +133,9 @@ class DesktopUI(QObject):
 
     def toggle_keyboard(self) -> None:
         self.sig_keyboard.emit()
+
+    def toggle_dock(self) -> None:
+        self.sig_dock.emit()
 
     def open_calibration(self) -> bool:
         if self.view_cls is None:
@@ -170,11 +183,51 @@ class DesktopUI(QObject):
         elif not snap.control and self.overlay.isVisible() and not self.overlay.toast:
             self.overlay.hide()
         self.overlay.on_snapshot(snap)
+        self._dock_frame(snap)
+
+    # ------------------------------------------------------------ Eye Dock
+
+    def _sync_dock(self, want: bool | None = None) -> None:
+        s = self.ctl.profile.settings.dock
+        show = s.enabled and self.ctl.core.control if want is None else want
+        if show:
+            if self.dock is None:
+                self.dock = EyeDock(s)
+                self.dock.chosen.connect(self._dock_chosen)
+            self.dock.s = s
+            self.dock.place(self.mapper.qscreen.availableGeometry())
+            if not self.dock.isVisible():
+                self.dock.show()
+            self.ctl.set_dwell_exclusions([self.mapper.global_rect_to_physical(self.dock.geometry())])
+        elif self.dock is not None and self.dock.isVisible():
+            self.dock.hide()
+            self.ctl.set_dwell_exclusions([])
+
+    def _dock_frame(self, snap: Snapshot) -> None:
+        want = self.ctl.profile.settings.dock.enabled and snap.control
+        visible = self.dock is not None and self.dock.isVisible()
+        if want != visible:
+            self._sync_dock(want)
+        if self.dock is None or not self.dock.isVisible():
+            return
+        self.dock.set_state(snap.dwell_next, self.ctl.profile.settings.dwell.enabled, snap.paused)
+        local = None
+        if snap.pointer is not None:
+            g = self.mapper.to_global_logical(*snap.pointer)
+            local = QPointF(g.x() - self.dock.x(), g.y() - self.dock.y())
+        self.dock.on_pointer(local, snap.t)
+
+    def _dock_chosen(self, key: str, kind: str) -> None:
+        if kind == "type":
+            self.ctl.set_dwell_next(None if key == "left_click" else key)
+        else:
+            self.ctl.perform(key)
 
     def _toggle_keyboard(self) -> None:
         if self.keyboard is None:
             self.keyboard = GazeKeyboard(self.ctl.backend, self.ctl.predictor, self.ctl.profile.settings.keyboard)
             self.keyboard.typed.connect(self._typed)
+            self.keyboard.layout_changed.connect(lambda _l: self.ctl.mark_dirty())
         if self.keyboard.isVisible():
             self.keyboard.hide()
         else:
@@ -202,6 +255,8 @@ class DesktopUI(QObject):
     def _screen_changed(self) -> None:
         self.mapper = ScreenMapper(pick_qscreen(self.ctl.config.screen_index))
         self.overlay.set_mapper(self.mapper)
+        if self.dock is not None and self.dock.isVisible():
+            self._sync_dock(True)
 
     def _quit(self) -> None:
         self.app.quit()
@@ -220,8 +275,9 @@ class DesktopUI(QObject):
         self._act_pause = QAction("Pause / resume", menu, triggered=lambda: self.ctl.perform("pause_toggle"))
         self._act_cal = QAction("Calibrate eyes", menu, triggered=lambda: self.ctl.start_calibration("gaze", "standard"))
         self._act_kb = QAction("Gaze keyboard", menu, triggered=self._toggle_keyboard)
+        self._act_dock = QAction("Eye Dock", menu, triggered=self.ctl.toggle_dock)
         self._act_quit = QAction("Quit Gazer", menu, triggered=self._quit)
-        for a in (self._act_deck, self._act_engage, self._act_pause, self._act_cal, self._act_kb):
+        for a in (self._act_deck, self._act_engage, self._act_pause, self._act_cal, self._act_kb, self._act_dock):
             menu.addAction(a)
         menu.addSeparator()
         menu.addAction(self._act_quit)

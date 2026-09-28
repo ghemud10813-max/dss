@@ -341,6 +341,8 @@ class SyntheticUser:
         img[:, :, 2] = 12
         if obs is not None:
             p = obs.points[:, :2].astype(np.int32)
+            hull = cv2.convexHull(p[:468])
+            cv2.fillConvexPoly(img, hull, (70, 92, 128), cv2.LINE_AA)
             for a, b in self.edges:
                 cv2.line(img, tuple(p[a]), tuple(p[b]), (120, 95, 40), 1, cv2.LINE_AA)
             for i in _IRIS_A[:1] + _IRIS_B[:1]:

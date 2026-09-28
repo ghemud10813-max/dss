@@ -2,6 +2,13 @@
 
 from __future__ import annotations
 
+import unicodedata
+
+
+def _is_word(w: str) -> bool:
+    return len(w) >= 2 and any(c.isalpha() for c in w) and all(
+        c.isalpha() or c == "'" or unicodedata.category(c) in ("Mn", "Mc") for c in w)
+
 _BASE = """
 the be to of and a in that have i it for not on with he as you do at this but his by from they we
 say her she or an will my one all would there their what so up out if about who get which go me when
@@ -25,29 +32,55 @@ early young important few public bad same able last long little own right big di
 sure free full special easy clear recent certain personal hard low late general real major possible
 something nothing everything anything someone everyone always never often sometimes again already
 soon later before during between under around without within through against among toward
+""".split() + """
+hai hain kya nahi nahin haan acha accha theek thik kaise kyun kyon kab kahan kaun mera meri mere tera teri
+tere apna apni hum tum aap main mujhe tujhe usko isko yeh woh wahi abhi kal aaj parso bahut thoda zyada
+bhai yaar dost ghar kaam paani khana chalo chal jaldi dheere please shukriya dhanyavaad namaste haanji
+matlab samajh pata chahiye sakta sakti karna karo kiya hua ho gaya raha rahi wala wali bas aur lekin phir
 """.split()
 
 
 class WordPredictor:
+    """Prefix completion ranked by a base list + your own words, and next-word
+    suggestions learned from pairs you type (stored as "prev>word" keys)."""
+
     def __init__(self, learned: dict[str, int] | None = None):
         n = len(_BASE)
         self.base = {}
         for i, w in enumerate(_BASE):
             self.base.setdefault(w, n - i)
-        self.learned: dict[str, int] = dict(learned or {})
+        data = dict(learned or {})
+        self.pairs: dict[str, int] = {k: v for k, v in data.items() if ">" in k}
+        self.learned: dict[str, int] = {k: v for k, v in data.items() if ">" not in k}
+        self.prev = ""
 
     def score(self, word: str) -> float:
         return self.base.get(word, 0) + self.learned.get(word, 0) * 60
 
-    def suggest(self, prefix: str, n: int = 4) -> list[str]:
+    def suggest(self, prefix: str, n: int = 4, prev: str | None = None) -> list[str]:
         p = prefix.lower()
-        cands = set(self.base) | set(self.learned)
+        prev = (self.prev if prev is None else prev).lower()
+        follow = {k.split(">", 1)[1]: v for k, v in self.pairs.items() if k.startswith(prev + ">")} if prev else {}
+        cands = set(self.base) | set(self.learned) | set(follow)
         if p:
             cands = {w for w in cands if w.startswith(p) and w != p}
-        ranked = sorted(cands, key=lambda w: (-self.score(w), len(w), w))
+        ranked = sorted(cands, key=lambda w: (-(follow.get(w, 0) * 500 + self.score(w)), len(w), w))
         return ranked[:n]
 
     def learn(self, word: str) -> None:
         w = word.strip().lower()
-        if len(w) >= 2 and w.isalpha():
+        if _is_word(w):
             self.learned[w] = self.learned.get(w, 0) + 1
+            if self.prev:
+                key = f"{self.prev}>{w}"
+                self.pairs[key] = self.pairs.get(key, 0) + 1
+            self.prev = w
+        else:
+            self.prev = ""
+
+    def end_sentence(self) -> None:
+        self.prev = ""
+
+    def export(self) -> dict[str, int]:
+        """Everything worth saving to the profile (words + learned pairs)."""
+        return {**self.learned, **self.pairs}

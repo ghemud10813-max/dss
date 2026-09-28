@@ -36,6 +36,8 @@ class GazeEstimator:
         self._since_refit = 0
         self._refitting = False
         self._lock = threading.Lock()
+        self.live_error: float | None = None  # EMA of |prediction - true target| (normalized)
+        self.live_count = 0
 
     @property
     def ready(self) -> bool:
@@ -94,8 +96,11 @@ class GazeEstimator:
             return False
         target = np.asarray(target_n, dtype=np.float64)
         pred = raw + self.bias
-        if np.hypot(*(pred - target)) > IMPLICIT_ACCEPT_RADIUS:
+        err = float(np.hypot(*(pred - target)))
+        if err > IMPLICIT_ACCEPT_RADIUS:
             return False
+        self.live_error = err if self.live_error is None else 0.85 * self.live_error + 0.15 * err
+        self.live_count += 1
         with self._lock:
             self.implicit.append((np.asarray(vector, dtype=np.float64).copy(), target))
         # Fast path: nudge a global offset right away.

@@ -64,6 +64,9 @@ ACTIONS: dict[str, str] = {
     "scroll_down": "Scroll down",
     "action_wheel": "Open action wheel",
     "zoom": "Zoom-click lens",
+    "zoom_click": "Precise click (zoom, then click)",
+    "dock_toggle": "Show/hide Eye Dock",
+    "trainer": "Open Gaze Trainer",
     "keyboard_toggle": "Show/hide keyboard",
     "pause_toggle": "Pause / resume",
     "recenter": "Recenter / fix drift",
@@ -140,6 +143,10 @@ class PointerSettings:
     adaptive_learning: bool = True
     invert_x: bool = False
     invert_y: bool = False
+    # Magnetic targets: lock the gaze cursor onto the button/link you look at
+    # (OS accessibility API; Windows UI Automation).
+    magnetic: bool = False
+    magnetic_radius_px: int = 45
 
 
 @dataclass
@@ -149,6 +156,17 @@ class DwellSettings:
     radius_px: int = 45
     action: str = "left_click"
     cooldown_ms: int = 700
+    targets_only: bool = False  # only dwell-click on buttons/links (needs magnetic targets)
+
+
+@dataclass
+class DockSettings:
+    """Eye Dock: a hover-dwell toolbar choosing what the next dwell does."""
+
+    enabled: bool = False
+    side: str = "right"  # right | left
+    button_px: int = 86
+    dwell_ms: int = 700
 
 
 @dataclass
@@ -241,6 +259,7 @@ class KeyboardSettings:
     dock: str = "bottom"  # bottom | top
     height_frac: float = 0.40
     predictions: bool = True
+    layout: str = "en"  # en | hi (Devanagari)
 
 
 ZONE_NAMES: dict[str, str] = {
@@ -311,6 +330,7 @@ class ProfileSettings:
     head_cal: HeadCalibration = field(default_factory=HeadCalibration)
     zones: ZoneSettings = field(default_factory=ZoneSettings)
     wellness: WellnessSettings = field(default_factory=WellnessSettings)
+    dock: DockSettings = field(default_factory=DockSettings)
     style: str = "eyes"
 
 
@@ -368,6 +388,7 @@ def apply_control_style(s: "ProfileSettings", style: str) -> None:
         s.dwell.radius_px = 60
         s.dwell.action = "left_click"
         s.zones.enabled = True
+        s.dock.enabled = True
         g.bindings = [
             Binding("double_blink", "start", "left_click"),
             Binding("wink_left", "start", "left_click"),
@@ -379,11 +400,13 @@ def apply_control_style(s: "ProfileSettings", style: str) -> None:
     elif style == "eyes_head":
         s.pointer.mode = "hybrid"
         s.dwell.enabled = False
+        s.dock.enabled = False
         s.zones.enabled = True
         g.bindings = default_bindings()
     elif style == "head":
         s.pointer.mode = "head_mouse"
         s.dwell.enabled = False
+        s.dock.enabled = False
         s.zones.enabled = False
         g.bindings = default_bindings()
 

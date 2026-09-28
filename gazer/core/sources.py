@@ -115,5 +115,6 @@ class SimulatedSource(FrameSource):
         while self._window and t - self._window[0] > 1.0:
             self._window.pop(0)
         self.fps = float(len(self._window))
-        img = self.user.render_preview(obs) if want_image else None
+        self._n = getattr(self, "_n", 0) + 1
+        img = self.user.render_preview(obs) if (want_image or self._n % 30 == 0) else None
         return SourceFrame(t, img, obs)

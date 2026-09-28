@@ -8,6 +8,7 @@ instead of the app you're writing in.
 from __future__ import annotations
 
 import sys
+import unicodedata
 
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import QGridLayout, QHBoxLayout, QPushButton, QSizePolicy, QVBoxLayout, QWidget
@@ -29,7 +30,19 @@ ROWS_SYM = [
     list("/\\|<>~`€£") + ["↵"],
     ["⇧"] + list("¿¡°•…") + [",", ".", "?", "!"],
 ]
+ROWS_HI = [  # Devanagari: vowel signs, vowels, consonants
+    ["ा", "ि", "ी", "ु", "ू", "े", "ै", "ो", "ौ", "ं", "्", "⌫"],
+    ["अ", "आ", "इ", "ई", "उ", "ऊ", "ए", "ऐ", "ओ", "औ", "ँ", "ः"],
+    ["क", "ख", "ग", "घ", "च", "छ", "ज", "झ", "ट", "ठ", "ड", "↵"],
+    ["ढ", "ण", "त", "थ", "द", "ध", "न", "प", "फ", "ब", "भ", "म"],
+    ["य", "र", "ल", "व", "श", "ष", "स", "ह", "ऋ", "ृ", "।", "?"],
+]
 SPECIAL = {"⌫": "backspace", "↵": "enter"}
+SENTENCE_END = {".", "?", "!", "।"}
+
+
+def _word_char(ch: str) -> bool:
+    return ch.isalpha() or ch == "'" or unicodedata.category(ch) in ("Mn", "Mc")
 
 
 def _no_activate(widget: QWidget) -> None:
@@ -52,6 +65,7 @@ def _no_activate(widget: QWidget) -> None:
 
 class GazeKeyboard(QWidget):
     typed = pyqtSignal(int)  # characters typed (for stats)
+    layout_changed = pyqtSignal(str)
 
     def __init__(self, backend: InputBackend, predictor: WordPredictor, settings: KeyboardSettings):
         super().__init__(None)
@@ -93,6 +107,10 @@ class GazeKeyboard(QWidget):
         bottom = QHBoxLayout()
         self.sym_btn = self._btn("123", self._toggle_symbols, "Mod", checkable=True)
         bottom.addWidget(self.sym_btn, 2)
+        self.lang_btn = self._btn("अ", self._toggle_lang, "Mod", checkable=True)
+        self.lang_btn.setToolTip("Hindi / English")
+        self.lang_btn.setChecked(self.s.layout == "hi")
+        bottom.addWidget(self.lang_btn, 1)
         bottom.addWidget(self._btn("◀", lambda: self._key("left")), 1)
         bottom.addWidget(self._btn("space", lambda: self._char(" ")), 7)
         bottom.addWidget(self._btn("▶", lambda: self._key("right")), 1)
@@ -119,7 +137,7 @@ class GazeKeyboard(QWidget):
             item = self.grid.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
-        rows = ROWS_SYM if self.symbols else ROWS_ALPHA
+        rows = ROWS_SYM if self.symbols else (ROWS_HI if self.s.layout == "hi" else ROWS_ALPHA)
         for r, row in enumerate(rows):
             col = 0
             for key in row:
@@ -157,11 +175,13 @@ class GazeKeyboard(QWidget):
     def _char(self, ch: str) -> None:
         self.backend.type_text(ch)
         self.typed.emit(1)
-        if ch.isalpha() or ch == "'":
+        if _word_char(ch):
             self.word += ch
         else:
             if self.word:
                 self.predictor.learn(self.word)
+            if ch in SENTENCE_END:
+                self.predictor.end_sentence()
             self.word = ""
         self._update_predictions()
 
@@ -204,6 +224,17 @@ class GazeKeyboard(QWidget):
     def _toggle_shift(self) -> None:
         self.shift = not self.shift
         self._build_keys()
+
+    def _toggle_lang(self) -> None:
+        self.s.layout = "en" if self.s.layout == "hi" else "hi"
+        self.lang_btn.setChecked(self.s.layout == "hi")
+        self.symbols = False
+        self.sym_btn.setChecked(False)
+        self.sym_btn.setText("123")
+        self.word = ""
+        self._build_keys()
+        self._update_predictions()
+        self.layout_changed.emit(self.s.layout)
 
     def _toggle_symbols(self) -> None:
         self.symbols = not self.symbols

@@ -60,6 +60,10 @@ def frame_payload(ctl: Controller, snap: Snapshot, extra: dict, with_mesh: bool)
             events.append({"k": "mode", "mode": ev[1]})
         elif k == "wellness":
             events.append({"k": "wellness", "kind": ev[1], "text": ev[2]})
+        elif k == "request":
+            events.append({"k": "request", "what": ev[1]})
+        elif k == "dwell_next":
+            events.append({"k": "dwell_next", "action": ev[1]})
     out = {
         "type": "frame", "t": _r(snap.t, 3), "face": snap.face, "control": snap.control, "paused": snap.paused,
         "calibrating": snap.calibrating, "mode": snap.mode, "mode_eff": snap.mode_effective,
@@ -74,7 +78,15 @@ def frame_payload(ctl: Controller, snap: Snapshot, extra: dict, with_mesh: bool)
         "zone": [snap.zone[0], _r(snap.zone[1], 3)] if snap.zone else None, "zones_on": snap.zones_enabled,
         "fps": _r(snap.fps, 1), "cam_fps": _r(snap.cam_fps, 1), "lat": _r(snap.latency_ms, 1),
         "q": _r(snap.quality, 3), "src": snap.source, "events": events,
+        "dwell_next": snap.dwell_next, "target": None,
     }
+    if snap.target is not None:
+        t = snap.target
+        x0, y0 = sc.px_to_norm(t.x, t.y)
+        out["target"] = {"rect": [_r(x0), _r(y0), _r(t.w / sc.width), _r(t.h / sc.height)],
+                         "kind": t.kind, "name": t.name}
+    if snap.lighting is not None:
+        out["lighting"] = snap.lighting
     if snap.wheel is not None:
         w = snap.wheel
         out["wheel"] = {"center": norm(w.center), "items": w.items, "hover": w.hover,

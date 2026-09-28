@@ -61,7 +61,7 @@ class CalibrationSession:
         self._last_t: float | None = None
         self.face = False
         self.result: CalibrationResult | None = None
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()  # engine thread (snapshots) vs UI thread (buttons)
         self._reset_data()
 
     # -------------------------------------------------------------- setup
@@ -98,23 +98,34 @@ class CalibrationSession:
 
     def ready(self) -> None:
         """The display is up (fullscreen) — start the intro countdown."""
-        if self.state == "waiting":
+        with self._lock:
+            if self.state == "waiting":
+                self.state = "intro"
+                self._intro_end = None
+
+    def skip_intro(self) -> None:
+        with self._lock:
+            if self.state in ("waiting", "intro"):
+                self._begin("run")
+
+    def cancel(self) -> None:
+        with self._lock:
+            if not self.finished:
+                self.state = "cancelled"
+
+    def retry(self) -> None:
+        with self._lock:
+            if self.finished:
+                return
+            self._reset_data()
             self.state = "intro"
             self._intro_end = None
 
-    def skip_intro(self) -> None:
-        if self.state in ("waiting", "intro"):
-            self._begin("run")
-
-    def cancel(self) -> None:
-        self.state = "cancelled"
-
-    def retry(self) -> None:
-        self._reset_data()
-        self.state = "intro"
-        self._intro_end = None
-
     def accept(self) -> CalibrationResult | None:
+        with self._lock:
+            return self._accept()
+
+    def _accept(self) -> CalibrationResult | None:
         if self.state != "results":
             return None
         if self.kind == "head":
@@ -253,7 +264,7 @@ class CalibrationSession:
     def _results_gaze(self, snap, t: float) -> None:
         # Hands-free confirmation with the model we just trained.
         if self.good and self.auto_accept_s and t - self.results_since >= self.auto_accept_s:
-            self.accept()
+            self._accept()
             return
         f = snap.features
         if self.temp is None or f is None or max(snap.closure) > 0.5:
@@ -273,7 +284,7 @@ class CalibrationSession:
             return
         if hit and t - self.hover_since >= BUTTON_DWELL_S and t - self.results_since > 1.0:
             if hit == "accept" and self.good:
-                self.accept()
+                self._accept()
             elif hit == "retry":
                 self.retry()
             elif hit == "cancel":
@@ -282,6 +293,10 @@ class CalibrationSession:
     # ---------------------------------------------------------------- view
 
     def view(self) -> dict:
+        with self._lock:
+            return self._view()
+
+    def _view(self) -> dict:
         v: dict = {"kind": self.kind, "preset": self.preset, "state": self.state, "face": self.face,
                    "error": self.error}
         if self.state == "intro":

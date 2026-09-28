@@ -57,3 +57,62 @@ def test_desktop_ui_overlay_and_keyboard(app, tmp_path):
 
     ui._frame(Snapshot(t=2.0, face=False, control=False))
     assert not ui.overlay.isVisible() or ui.overlay.toast is not None
+
+
+def test_keyboard_hindi_layout(app):
+    from gazer.config import KeyboardSettings
+    from gazer.core.input_backend import RecordingInput
+    from gazer.core.wordpredict import WordPredictor
+    from gazer.ui.keyboard import GazeKeyboard
+
+    backend = RecordingInput()
+    kb = GazeKeyboard(backend, WordPredictor(), KeyboardSettings())
+    kb._toggle_lang()
+    assert kb.s.layout == "hi"
+    for ch in ("न", "म", "स", "्", "त", "े"):
+        kb._press(ch)
+    assert kb.word == "नमस्ते"
+    kb._char(" ")
+    assert "नमस्ते" in kb.predictor.learned
+    assert ("text", "े") in backend.events
+
+
+def test_eye_dock_hover_dwell_sets_click_type(app, tmp_path):
+    from PyQt6.QtCore import QPointF
+
+    from gazer.config import AppConfig as Cfg
+    from gazer.controller import Controller as Ctl
+    from gazer.core.engine import Snapshot as Snap
+    from gazer.core.profiles import ProfileStore as Store
+    from gazer.core.targets import Target
+    from gazer.ui import desktop
+    from gazer.ui.eyedock import ITEMS
+
+    ctl = Ctl(Cfg(), demo=True, store=Store(tmp_path / "p"), persist_config=False)
+    ui = desktop.DesktopUI(app, ctl, FakeHub())
+    ctl.ui = ui
+    ctl.profile.settings.dock.enabled = True
+    ctl.core.control = True
+    ui._frame(Snap(t=0.0, face=True, control=True, pointer=(10, 10)))
+    dock = ui.dock
+    assert dock is not None and dock.isVisible()
+    posted = []
+    ctl.runner.post = posted.append  # capture engine commands
+    right = [k for k, *_ in ITEMS].index("right_click")
+    r = dock.button_rects()[right]
+    centre = QPointF(r.center().x(), r.center().y())
+    dock.on_pointer(centre, 1.0)
+    dock.on_pointer(centre, 1.0 + dock.s.dwell_ms / 1000 + 0.05)
+    assert dock.current == "right_click" and posted, "hover-dwell chose RIGHT"
+    posted[-1](ctl.core)
+    assert ctl.core.dwell_next == "right_click"
+    # the dock registered itself as a no-dwell zone
+    ctl.set_dwell_exclusions([(0, 0, 10, 10)])
+    posted[-1](ctl.core)
+    assert ctl.core.dwell_exclusions == [(0, 0, 10, 10)]
+
+    snap = Snap(t=2.0, face=True, control=True, pointer=(700, 400), target=Target(650, 380, 120, 40, "button", "Save"),
+                dwell_next="right_click")
+    ui._frame(snap)
+    assert ui.overlay.grab().toImage().width() > 0  # brackets + badge paint
+    dock.grab()

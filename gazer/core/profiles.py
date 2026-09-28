@@ -70,6 +70,9 @@ class Profile:
         try:
             self.words = {str(k): int(v) for k, v in
                           json.loads((self.dir / "words.json").read_text(encoding="utf-8")).items()}
+            # keep the file small: drop one-off pairs once it grows large
+            if len(self.words) > 20000:
+                self.words = {k: v for k, v in self.words.items() if ">" not in k or v > 1}
         except (OSError, ValueError, TypeError, AttributeError):
             self.words = {}
         return self

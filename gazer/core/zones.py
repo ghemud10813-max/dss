@@ -83,13 +83,14 @@ class ZoneDetector:
         if not self.armed:
             if action in REPEATABLE and t >= self._next_repeat:
                 self._repeats += 1
-                self._next_repeat = t + max(0.08, 0.35 * 0.85 ** self._repeats)
+                # accelerate from ~4 to ~16 notches/s: fast enough to skim, slow enough to read
+                self._next_repeat = t + max(0.06, 0.25 * 0.88 ** self._repeats)
                 self.progress = 1.0
                 return [action]
             return []
         self.progress = min((t - self.since) / dwell, 1.0)
         if self.progress >= 1.0:
             self.armed = False
-            self._next_repeat = t + 0.35
+            self._next_repeat = t + 0.3
             return [action]
         return []

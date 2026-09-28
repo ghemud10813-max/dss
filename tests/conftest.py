@@ -29,3 +29,11 @@ def make_feats(t=0.0, head_point=(0.0, 0.0), gaze_vector=None, blend=None, roll=
 @pytest.fixture
 def feats_factory():
     return make_feats
+
+
+def pytest_sessionfinish(session, exitstatus):
+    """Watchdog: if the interpreter lingers after the tests (a stuck non-daemon
+    thread), dump every thread's stack and exit instead of hanging CI."""
+    import faulthandler
+
+    faulthandler.dump_traceback_later(20, exit=True, file=sys.stderr)

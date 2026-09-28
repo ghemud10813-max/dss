@@ -35,6 +35,7 @@ from gazer.core.insights import Insights
 from gazer.core.pointer import MODE_ORDER
 from gazer.core.profiles import Profile, ProfileStore
 from gazer.core.screen import list_monitors, pick_monitor
+from gazer.core.targets import StaticProvider, TargetSnapper, default_provider
 from gazer.core.wordpredict import WordPredictor
 from gazer.paths import config_path
 
@@ -47,6 +48,7 @@ class UIHooks(Protocol):
     """Implemented by the Qt layer. All methods may be called from any thread."""
 
     def toggle_keyboard(self) -> None: ...
+    def toggle_dock(self) -> None: ...
     def open_calibration(self) -> bool: ...
     def close_calibration(self) -> None: ...
     def screen_changed(self) -> None: ...
@@ -82,6 +84,10 @@ class Controller:
 
             source_factory = lambda cfg: SimulatedSource()  # noqa: E731
         self.runner = EngineRunner(self.config, self.core, self._on_snapshot, self._on_status, source_factory)
+        # Magnetic targets: real accessibility tree normally; demo mode gets a static (empty) one.
+        provider = StaticProvider([]) if demo else default_provider()
+        self.core.snapper = TargetSnapper(provider, self.profile.settings.pointer.magnetic_radius_px)
+        self.lighting: dict | None = None
         self.insights = Insights(screen, self.profile.settings.wellness)
         self.predictor = WordPredictor(self.profile.words)
         self.calib: CalibrationSession | None = None
@@ -100,6 +106,7 @@ class Controller:
         self._last_insights = 0.0
         self._insights_payload: dict | None = None
         self._stop = threading.Event()
+        self._demo_look_until = 0.0
         self._saver: threading.Thread | None = None
         self.started = time.time()
 
@@ -119,6 +126,7 @@ class Controller:
     def start(self) -> None:
         if self.demo and not self.profile.gaze.ready:
             self._demo_pretrain()
+        self.core.snapper.start()
         self.runner.start()
         if self.config.hotkeys.enabled and not self.demo:
             self.hotkeys.start()
@@ -143,11 +151,13 @@ class Controller:
         if self.voice_listener:
             self.voice_listener.stop()
         self.runner.stop()
+        if self.core.snapper is not None:
+            self.core.snapper.stop()
         self.save()
 
     def save(self) -> None:
         with self._lock:
-            self.profile.words = dict(self.predictor.learned)
+            self.profile.words = self.predictor.export()
             try:
                 self.profile.save_all()
                 if self.persist_config:
@@ -207,7 +217,7 @@ class Controller:
             extra["calib"] = calib.view()
             if calib.finished:
                 self._finish_calibration(calib)
-        elif self.sim_user is not None:
+        elif self.sim_user is not None and time.time() > self._demo_look_until:
             self.sim_user.attend(None)
 
         for ev in self.insights.update(snap):
@@ -221,11 +231,21 @@ class Controller:
         if self._neutral is not None:
             self._collect_neutral(snap)
 
+        if snap.lighting is not None:
+            changed = self.lighting is None or self.lighting.get("status") != snap.lighting["status"]
+            self.lighting = snap.lighting
+            if changed and snap.lighting["status"] not in ("good", "unknown") and snap.face:
+                snap.events.append(("toast", snap.lighting["advice"]))
+            if changed:
+                self.notify()
+
         for ev in snap.events:
             if ev[0] == "request":
                 self._handle_request(ev[1])
-            elif ev[0] == "mode":
+            elif ev[0] in ("mode", "settings"):
                 self.mark_dirty()
+            elif ev[0] == "dwell_next":
+                self.notify()
 
         for lst in list(self.listeners):
             try:
@@ -240,6 +260,8 @@ class Controller:
             self.set_voice(not self.profile.settings.voice.enabled)
         elif kind == "calibrate":
             self.start_calibration("gaze", "standard")
+        elif kind == "dock_toggle":
+            self.toggle_dock()
 
     # ------------------------------------------------------------- actions
 
@@ -253,6 +275,8 @@ class Controller:
             self.set_voice(not self.profile.settings.voice.enabled)
         elif action == "calibrate":
             self.start_calibration("gaze", "standard")
+        elif action == "dock_toggle":
+            self.toggle_dock()
         else:
             self.runner.post(lambda core: core.perform(action))
             if action in ("dwell_toggle", "zones_toggle", "mode_cycle") or action.startswith("mode:"):
@@ -269,6 +293,25 @@ class Controller:
             self.ui.toggle_keyboard()
         else:
             self.runner.post(lambda core: core._toast("The gaze keyboard needs the desktop app"))
+
+    def toggle_dock(self) -> None:
+        d = self.profile.settings.dock
+        d.enabled = not d.enabled
+        if self.ui is not None:
+            self.ui.toggle_dock()
+        elif d.enabled:
+            self.runner.post(lambda core: core._toast("The Eye Dock needs the desktop app"))
+        self.mark_dirty()
+
+    def set_dwell_next(self, action: str | None) -> None:
+        if action is not None and action not in ACTIONS:
+            raise ValueError(f"Unknown action {action}")
+        self.runner.post(lambda core: core.set_dwell_next(action))
+
+    def set_dwell_exclusions(self, rects: list[tuple[float, float, float, float]]) -> None:
+        """Screen areas where dwell never clicks (the Eye Dock handles its own dwell)."""
+        rects = list(rects)
+        self.runner.post(lambda core: setattr(core, "dwell_exclusions", rects))
 
     # -------------------------------------------------------- calibration
 
@@ -550,6 +593,18 @@ class Controller:
             self.download_voice_model()
         elif cmd == "camera_restart":
             self.runner.restart_camera(self.config.camera)
+        elif cmd == "dwell_next":
+            v = a.get("action")
+            self.set_dwell_next(None if v in (None, "", "none") else str(v))
+        elif cmd == "dock":
+            self.toggle_dock()
+        elif cmd == "demo_look":
+            user = self.sim_user
+            if user is None:
+                raise ValueError("Only available in demo mode")
+            p = a.get("p")
+            user.attend(None if p is None else (float(p[0]), float(p[1])))
+            self._demo_look_until = time.time() + float(a.get("hold", 4.0))
         elif cmd == "demo_gesture":
             user = self.sim_user
             if user is None:
@@ -587,7 +642,9 @@ class Controller:
                 "name": prof.name,
                 "settings": to_dict(prof.settings),
                 "gaze": {"ready": g.ready, "samples": g.n_samples, "implicit": len(g.implicit),
-                         "rmse": rep.rmse if rep else None},
+                         "rmse": rep.rmse if rep else None,
+                         "live_error_px": None if g.live_error is None else g.live_error * s.width,
+                         "live_count": g.live_count},
                 "history": [asdict(h) for h in prof.history[-20:]],
                 "stats": asdict(prof.stats),
             },
@@ -602,6 +659,11 @@ class Controller:
                       "download": self.voice_download,
                       "commands": sorted(voice.COMMANDS)},
             "hotkeys": {"error": self.hotkeys.error},
+            "targets": {"provider": self.core.snapper.provider.name if self.core.snapper else "none",
+                        "available": bool(self.core.snapper and self.core.snapper.available),
+                        "status": self.core.snapper.status if self.core.snapper else "off"},
+            "dwell_next": self.core.dwell_next,
+            "lighting": self.lighting,
             "insights": self._insights_payload,
         }
 

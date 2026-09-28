@@ -46,6 +46,11 @@ class ScreenMapper:
     def len_to_local(self, v: float) -> float:
         return v / self.dpr
 
+    def global_rect_to_physical(self, r) -> tuple[float, float, float, float]:
+        """Global logical QRect → physical (x, y, w, h), the engine's coordinates."""
+        return (self.physical.x + (r.x() - self.geo.x()) * self.dpr, self.physical.y + (r.y() - self.geo.y()) * self.dpr,
+                r.width() * self.dpr, r.height() * self.dpr)
+
 
 def pick_qscreen(index: int) -> QScreen:
     screens = QGuiApplication.screens()
