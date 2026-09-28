@@ -175,6 +175,12 @@ class Hub:
             await c.ws.close()
         if self._runner:
             await self._runner.cleanup()
+        # cancel in-flight sends / debounced state pushes so the loop stops cleanly
+        me = asyncio.current_task()
+        pending = [t for t in asyncio.all_tasks() if t is not me]
+        for t in pending:
+            t.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
 
     def _run(self) -> None:
         self.loop = asyncio.new_event_loop()

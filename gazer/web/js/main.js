@@ -14,6 +14,8 @@ import { buildZones } from "./views/zones.js";
 import { buildInsights } from "./views/insights.js";
 import { buildVoice } from "./views/voice.js";
 import { buildSystem } from "./views/system.js";
+import { buildTrainer } from "./views/trainer.js";
+import { openTrainer, trainerFrame, isTraining } from "./trainer.js";
 
 const CALIB_ONLY = location.hash === "#calib";
 const app = document.getElementById("app");
@@ -57,6 +59,7 @@ const ctx = {
   onPreview: (fn) => previewFns.add(fn),
   onState: (fn) => stateFns.add(fn),
   startCalibration,
+  startTrainer,
   replayBoot: () => boot(true),
   onboarding: (force) => onboarding(force),
 };
@@ -65,7 +68,8 @@ const ctx = {
 
 const NAV = [
   ["deck", "DECK", buildDeck], ["calibrate", "CALIBRATE", buildCalibrate], ["gestures", "GESTURES", buildGestures],
-  ["pointer", "POINTER", buildPointer], ["zones", "ZONES", buildZones], ["insights", "INSIGHTS", buildInsights],
+  ["pointer", "POINTER", buildPointer], ["zones", "ZONES", buildZones], ["trainer", "TRAINER", buildTrainer],
+  ["insights", "INSIGHTS", buildInsights],
   ["voice", "VOICE", buildVoice], ["system", "SYSTEM", buildSystem],
 ];
 const viewsRoot = document.getElementById("views");
@@ -106,7 +110,7 @@ function go(key, instant = false) {
 }
 
 window.addEventListener("keydown", (e) => {
-  if (e.altKey && /^[1-8]$/.test(e.key)) { go(NAV[Number(e.key) - 1][0]); e.preventDefault(); }
+  if (e.altKey && /^[1-9]$/.test(e.key) && NAV[Number(e.key) - 1]) { go(NAV[Number(e.key) - 1][0]); e.preventDefault(); }
 });
 
 // ----------------------------------------------------------------- top bar
@@ -163,7 +167,7 @@ window.addEventListener("gazer-toast", (e) => showToast(e.detail.text, e.detail.
 const calloutRoot = document.getElementById("callouts");
 function drawCallouts() {
   const v = views[current];
-  const items = v && v.callouts && !isCalibrating() ? v.callouts(stage, store.frame) : [];
+  const items = v && v.callouts && !isCalibrating() && !isTraining() ? v.callouts(stage, store.frame) : [];
   while (calloutRoot.children.length < items.length * 3) {
     calloutRoot.append(h("div", { class: "callout-dot" }), h("div", { class: "callout-line" }),
       h("div", { class: "callout" }, h("div", { class: "co-title" }), h("div", { class: "co-val" })));
@@ -211,6 +215,17 @@ async function startCalibration(kind = "gaze", preset = "standard", append = fal
   }
 }
 
+function startTrainer(level) {
+  unlock();
+  sfx.engage();
+  stage.paused = true;
+  openTrainer(level, () => {
+    stage.paused = false;
+    const v = views[current];
+    v && v.enter && v.enter();
+  });
+}
+
 // -------------------------------------------------------------- networking
 
 let firstState = true;
@@ -250,7 +265,9 @@ on("frame", (f) => {
     stage.setHeat(f.insights.heat);
     for (const vv of Object.values(views)) vv.onInsights && vv.onInsights(f.insights);
   }
+  trainerFrame(f);
   for (const ev of f.events) {
+    if (ev.k === "request" && ev.what === "trainer" && !CALIB_ONLY) go("trainer");
     if (ev.k === "toast") showToast(ev.text, ev.text.startsWith("20-20-20") || ev.text.includes("blink") ? "wellness" : "");
     if (ev.k === "click") sfx.click();
   }
@@ -322,7 +339,7 @@ function onboarding(force) {
       c.addEventListener("click", () => { style = k; sfx.toggleOn(); [...choices.children].forEach((x) => x.classList.toggle("on", x === c)); });
       choices.append(c);
     }
-    const p = h("div", { class: "panel" }, h("div", { class: "step-dots" }, h("i", { class: "on" }), h("i")),
+    const p = h("div", { class: "panel" }, h("div", { class: "step-dots" }, h("i", { class: "on" }), h("i"), h("i")),
       h("div", { class: "modal-title" }, "WELCOME, PILOT"),
       h("div", { class: "modal-sub" }, "Gazer lets you drive your whole computer with your eyes: move the cursor by looking, click by blinking twice, winking or dwelling, scroll by glancing past the screen edge, and type on a gaze keyboard. How do you want to control it?"),
       choices, h("div", { style: { height: "18px" } }),
@@ -332,10 +349,36 @@ function onboarding(force) {
       }, "primary")));
     layer.append(h("div", { class: "modal" }, p));
   };
+  let checkTimer = null;
   const step2 = () => {
+    // Optics check: fix face visibility and lighting *before* calibrating.
+    layer.innerHTML = "";
+    const face = h("div", { class: "check-row" });
+    const light = h("div", { class: "check-row" });
+    const advice = h("div", { class: "modal-sub", style: { marginTop: "10px", marginBottom: "0" } });
+    const paint = () => {
+      const f = store.frame, L = store.state?.lighting;
+      const ok = (el, good, text) => { el.className = `check-row ${good ? "good" : "bad"}`; el.textContent = text; };
+      ok(face, !!f?.face, f?.face ? "FACE LOCKED" : "LOOKING FOR YOUR FACE…");
+      if (!L || L.status === "unknown") ok(light, false, "LIGHTING: MEASURING…");
+      else ok(light, L.status === "good", `LIGHTING: ${L.status.toUpperCase()}`);
+      advice.textContent = L && L.status !== "good" && L.status !== "unknown" ? L.advice
+        : "Sit where you normally sit, 40–80 cm from the screen, with the camera at the top-centre.";
+    };
+    paint();
+    clearInterval(checkTimer);
+    checkTimer = setInterval(() => { if (!document.body.contains(face)) clearInterval(checkTimer); else paint(); }, 300);
+    const p = h("div", { class: "panel" }, h("div", { class: "step-dots" }, h("i", { class: "on" }), h("i", { class: "on" }), h("i")),
+      h("div", { class: "modal-title" }, "OPTICS CHECK"),
+      h("div", { class: "modal-sub" }, "Good light on your face is the biggest single factor in eye-tracking accuracy."),
+      face, light, advice, h("div", { style: { height: "18px" } }),
+      h("div", { class: "btn-row" }, button("BACK", step1), button("CONTINUE ›", () => { clearInterval(checkTimer); step3(); }, "primary")));
+    layer.append(h("div", { class: "modal" }, p));
+  };
+  const step3 = () => {
     layer.innerHTML = "";
     const needs = style !== "head";
-    const p = h("div", { class: "panel" }, h("div", { class: "step-dots" }, h("i", { class: "on" }), h("i", { class: "on" })),
+    const p = h("div", { class: "panel" }, h("div", { class: "step-dots" }, h("i", { class: "on" }), h("i", { class: "on" }), h("i", { class: "on" })),
       h("div", { class: "modal-title" }, needs ? "CALIBRATE YOUR EYES" : "YOU'RE READY"),
       h("div", { class: "modal-sub" }, needs
         ? "About 50 seconds: look at each glowing target until it moves. Face the camera with light on your face. You can recalibrate anytime — and Gazer keeps learning from every click."

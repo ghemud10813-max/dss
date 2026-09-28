@@ -62,7 +62,11 @@ export function buildDeck(root, ctx) {
   const mFps = mk("TRACK FPS", "", "#3ee8d8", 40);
   const mLat = mk("LATENCY", "ms", "#9b7cff", null);
   const mQ = mk("SIGNAL", "%", "#4dffa6", 100);
-  telP.add(h("div", { class: "telemetry" }, mFps.el, mLat.el, mQ.el));
+  const accV = h("span", {}, "—");
+  const lightV = h("span", {}, "—");
+  telP.add(h("div", { class: "telemetry" }, mFps.el, mLat.el, mQ.el),
+    h("div", { class: "tele-row" }, h("span", { class: "muted" }, "EYE ACCURACY"), accV),
+    h("div", { class: "tele-row" }, h("span", { class: "muted" }, "LIGHTING"), lightV));
   left.append(telP.el);
 
   // ---------------------------------------------------------------- ocular
@@ -132,6 +136,8 @@ export function buildDeck(root, ctx) {
     toggle({ label: "Dwell click", sub: "Hold your gaze still to click", path: "dwell.enabled" }).el,
     toggle({ label: "Gaze zones", sub: "Glance past screen edges to scroll & act", path: "zones.enabled" }).el,
     toggle({ label: "Learn from my clicks", sub: "Accuracy improves the more you use it", path: "pointer.adaptive_learning" }).el,
+    toggle({ label: "Magnetic targets", sub: "Cursor locks onto buttons & links (Windows)", path: "pointer.magnetic" }).el,
+    toggle({ label: "Eye Dock", sub: "Edge toolbar: right/double/drag/precise by gaze", path: "dock.enabled" }).el,
     toggle({ label: "Show gaze dot on desktop", path: "overlay.show_gaze_dot" }).el,
   );
   right.append(qP.el);
@@ -192,6 +198,15 @@ export function buildDeck(root, ctx) {
         b.bar.style.opacity = g && !g.enabled ? 0.35 : 1;
       }
       banner.style.display = s.profile.gaze.ready ? "none" : "";
+      const gz = s.profile.gaze;
+      const last = s.profile.history[s.profile.history.length - 1];
+      if (gz.live_error_px != null && gz.live_count >= 3) {
+        accV.textContent = `~${Math.round(gz.live_error_px)} px LIVE · ${gz.live_count} clicks`;
+      } else accV.textContent = last ? `${Math.round(last.mean_px)} px · ${last.grade.toUpperCase()}` : "UNCALIBRATED";
+      const L = s.lighting;
+      lightV.textContent = L ? (L.status === "unknown" ? "—" : L.status.toUpperCase()) : "—";
+      lightV.style.color = !L || L.status === "unknown" ? "" : L.status === "good" ? "var(--green)" : "var(--amber)";
+      lightV.title = L ? L.advice : "";
       demoP.el.style.display = s.app.demo ? "" : "none";
       feedP.tagEl.textContent = s.app.demo ? "SIMULATED" : "LIVE";
     },
@@ -207,7 +222,8 @@ export function buildDeck(root, ctx) {
         b.classList.toggle("fallback", f.mode_eff === m && f.mode !== m);
       }
       const fb = f.mode !== f.mode_eff ? ` <span style="color:var(--amber)">→ ${MODE_SHORT[f.mode_eff]} UNTIL CALIBRATED</span>` : "";
-      modeLbl.innerHTML = `MODE // <b>${MODE_SHORT[f.mode] || f.mode}</b>${fb}`;
+      const nd = f.dwell_next ? ` <span style="color:var(--amber)">· NEXT DWELL ${(store.catalog?.actions[f.dwell_next] || f.dwell_next).toUpperCase()}</span>` : "";
+      modeLbl.innerHTML = `MODE // <b>${MODE_SHORT[f.mode] || f.mode}</b>${fb}${nd}`;
 
       mFps.val.innerHTML = `${Math.round(f.fps)}`;
       mLat.val.innerHTML = `${Math.round(f.lat)}<small>ms</small>`;
@@ -245,7 +261,10 @@ export function buildDeck(root, ctx) {
         out.push({ at: stage.anchors.head, dx: -90, dy: -46, title: "HEAD POSE",
           val: `Y ${f.head[0].toFixed(1)}°  P ${f.head[1].toFixed(1)}°  R ${f.head[2].toFixed(1)}°` });
       }
-      if (stage.anchors.gaze?.visible && f.gaze) {
+      if (stage.anchors.gaze?.visible && f.gaze && f.target) {
+        out.push({ at: stage.anchors.gaze, dx: 70, dy: -60, title: "TARGET LOCK",
+          val: `${f.target.kind.toUpperCase()}${f.target.name ? ` · ${f.target.name}` : ""}` });
+      } else if (stage.anchors.gaze?.visible && f.gaze) {
         out.push({ at: stage.anchors.gaze, dx: 70, dy: -60, title: "GAZE LOCK",
           val: `${Math.round(f.gaze[0] * (store.state?.screen.w || 1920))}, ${Math.round(f.gaze[1] * (store.state?.screen.h || 1080))} px` });
       }

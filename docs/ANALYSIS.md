@@ -65,9 +65,29 @@ Bugs found and fixed along the way:
 
 **Not verified here:** a real webcam and a real display. The cloud container has neither, so real-world gaze accuracy, camera backends and on-screen input injection still need a run on your machine. `python -m gazer --demo` is the quickest check that everything is wired up before plugging in the camera.
 
+## Second pass (v3.1): audit and enhancements
+
+A second review of v3.0, hunting weaknesses that matter for eyes-only use, found:
+
+| Finding | Fix |
+|---|---|
+| **Midas touch.** Dwell-click fired wherever you rested your gaze, so pausing while reading could click a link. | Magnetic targets + "dwell only on buttons & links"; a DWELL on/off toggle in the Eye Dock. |
+| **Eyes-only never improved with use.** Pure gaze mode deliberately didn't learn from clicks, because the click point *was* the prediction. | Clicks locked onto a UI element are labelled with the element's true centre, so they become training samples. The live accuracy estimate comes from these. |
+| **No right/double-click or drag by eye** except through the action wheel. | Eye Dock (focus-free, with its own hover-dwell) sets a one-shot click type; precise zoom-click is a two-step dwell. |
+| **Race in calibration.** Web buttons (accept, retry) mutated the session while the engine thread was updating it. | All session mutators share a reentrant lock; finished sessions can't be revived. |
+| **Stale UI.** Toggling dwell or zones via gesture, zone or wheel didn't update the deck. | The engine emits settings events; the controller republishes state. |
+| **Zone scrolling ran away** (~37 notches/s after a few seconds). | One notch per repeat, accelerating from ~4 to ~16/s (tested). |
+| **Held gestures were dropped** whenever any setting changed. | The binding resolver is only rebuilt when the bindings themselves change. |
+| **Unclean hub shutdown** (asyncio "task destroyed" warning). | Pending tasks are cancelled and awaited on stop. |
+| Lighting problems were invisible until accuracy was bad. | Lighting advisor (tested on synthetic frames), an onboarding optics check, and toasts. |
+
+Also added: the Gaze Trainer (Fitts' throughput), a Devanagari keyboard, Hinglish vocabulary, next-word prediction, and an opt-in real-browser smoke test.
+
+**Not verified here:** the Windows UI Automation provider (`UIAProvider`) needs a Windows machine. The snapping and learning logic around it is covered by tests with a static provider, and any provider failure just disables magnetic targets. Magnetic targets are **off by default** until they've been tried on real Windows apps.
+
 ## Ideas for next steps
 
-- **Snap-to-target.** Use OS accessibility APIs (UI Automation / AT-SPI) to pull the gaze cursor onto the nearest clickable element. This is the biggest possible accuracy win for eyes-only use.
+- **Magnetic targets on Linux/macOS** via AT-SPI and the macOS AX API (the provider interface is ready).
 - **Dasher-style or swipe gaze typing** for faster text entry than key-by-key dwell.
 - **Per-app profiles** (e.g. reading mode in the browser, precision mode in design tools).
 - **Multi-monitor gaze**, choosing the monitor from head pose.

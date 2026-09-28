@@ -53,7 +53,8 @@ export function buildSystem(root, ctx) {
     toggle({ label: "On-screen toasts", path: "overlay.show_toasts" }).el,
     field("Keyboard dock", select({ options: { bottom: "Bottom", top: "Top" }, path: "keyboard.dock" }).el),
     slider({ label: "Keyboard height", path: "keyboard.height_frac", min: 0.25, max: 0.6, step: 0.01, fmt: (v) => `${Math.round(v * 100)}%` }).el,
-    toggle({ label: "Word prediction", path: "keyboard.predictions" }).el);
+    toggle({ label: "Word prediction", path: "keyboard.predictions" }).el,
+    field("Keyboard language", select({ options: { en: "English (QWERTY)", hi: "हिन्दी (Devanagari)" }, path: "keyboard.layout" }).el));
   right.append(disp.el);
 
   // interface

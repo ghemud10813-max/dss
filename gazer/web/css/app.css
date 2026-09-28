@@ -313,6 +313,13 @@ select option { background: #07111a; }
 .modal-title { font-family: var(--display); font-weight: 900; font-size: 22px; letter-spacing: .22em; color: var(--cyan-hi);
   text-shadow: 0 0 18px var(--cyan-glow); margin-bottom: 6px; }
 .modal-sub { color: var(--text-2); font-size: 15px; margin-bottom: 18px; line-height: 1.45; }
+.check-row { font-family: var(--display); font-size: 12px; letter-spacing: .2em; padding: 12px 14px; margin-top: 8px;
+  border: 1px solid var(--line); display: flex; align-items: center; gap: 10px; }
+.check-row::before { content: ""; width: 9px; height: 9px; border-radius: 50%; background: var(--dim); }
+.check-row.good { border-color: rgba(77,255,166,.4); color: var(--green); }
+.check-row.good::before { background: var(--green); box-shadow: 0 0 10px var(--green); }
+.check-row.bad { border-color: rgba(255,181,71,.4); color: var(--amber); }
+.check-row.bad::before { background: var(--amber); animation: blink 1s infinite; }
 .step-dots { display: flex; gap: 6px; margin-bottom: 16px; }
 .step-dots i { width: 22px; height: 3px; background: var(--dim); }
 .step-dots i.on { background: var(--cyan); box-shadow: 0 0 8px var(--cyan); }
@@ -353,6 +360,8 @@ select option { background: #07111a; }
 .feed .lock { position: absolute; border: 1px solid var(--cyan); z-index: 2; transition: all .15s linear; box-shadow: 0 0 10px var(--cyan-glow); }
 
 .telemetry { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+.tele-row { display: flex; justify-content: space-between; margin-top: 10px; font-size: 13px; }
+.tele-row span:last-child { font-family: var(--mono); font-size: 11.5px; color: var(--text); }
 .metric .m-val { font-family: var(--mono); font-weight: 600; font-size: 22px; color: var(--text); line-height: 1; }
 .metric .m-val small { font-size: 11px; color: var(--muted); margin-left: 2px; }
 .metric .m-label { font-family: var(--display); font-size: 7.5px; letter-spacing: .2em; color: var(--muted); margin-top: 5px; }
@@ -550,6 +559,14 @@ canvas.chart { width: 100%; height: 150px; display: block; }
 .calib-btn.disabled { opacity: .3; }
 .calib-btn.accept { border-color: var(--cyan); color: var(--cyan-hi); }
 .calib-btn.cancel { color: #ff9aac; border-color: rgba(255,77,106,.5); }
+
+/* =============================================================== TRAINER */
+
+#trainer-layer { position: fixed; inset: 0; z-index: 86; background: #04070b; cursor: none; }
+#trainer-layer[hidden] { display: none; }
+#trainer-layer canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+.trainer-level .choice-title { flex-wrap: wrap; }
+.trainer-best { margin-left: auto; font-family: var(--mono); font-size: 11px; letter-spacing: 0; color: var(--green); }
 
 /* ================================================================== BOOT */
 

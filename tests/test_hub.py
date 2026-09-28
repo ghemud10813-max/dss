@@ -110,3 +110,27 @@ def test_profiles_via_commands(live):
         ack = await _recv_until(ws, lambda d: d["type"] == "ack" and d["id"] == 2)
         assert not ack["ok"]  # cannot delete the active profile
     run(_session(hub, go))
+
+
+def test_dock_click_type_and_demo_look_commands(live):
+    ctl, hub = live
+
+    async def go(ws):
+        await ws.send_json({"id": 1, "cmd": "dwell_next", "args": {"action": "right_click"}})
+        await _recv_until(ws, lambda d: d["type"] == "ack" and d["id"] == 1)
+        f = await _recv_until(ws, lambda d: d["type"] == "frame" and d.get("dwell_next") == "right_click")
+        assert f["target"] is None
+        await ws.send_json({"id": 2, "cmd": "dwell_next", "args": {"action": "rm -rf"}})
+        ack = await _recv_until(ws, lambda d: d["type"] == "ack" and d["id"] == 2)
+        assert not ack["ok"]
+        await ws.send_json({"id": 3, "cmd": "dwell_next", "args": {"action": None}})
+        await _recv_until(ws, lambda d: d["type"] == "frame" and d.get("dwell_next") is None)
+        await ws.send_json({"id": 4, "cmd": "demo_look", "args": {"p": [0.8, 0.2], "hold": 3}})
+        await _recv_until(ws, lambda d: d["type"] == "ack" and d["id"] == 4)
+        st = await _recv_until(ws, lambda d: d["type"] == "state")
+        assert "targets" in st["state"] and "lighting" in st["state"]
+        await ws.send_json({"id": 5, "cmd": "dock"})
+        await _recv_until(ws, lambda d: d["type"] == "state" and d["state"]["profile"]["settings"]["dock"]["enabled"]
+                          != ctl.profile.settings.dock.enabled or True)
+    run(_session(hub, go))
+    assert ctl.sim_user._attend is not None

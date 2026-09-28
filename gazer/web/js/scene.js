@@ -25,6 +25,7 @@ export const VIEWS = {
   gestures:  { pos: [-1.25, -0.3, 2.35], look: [0.05, -0.28, 0], fov: 40 },
   pointer:   { pos: [7.2, 1.8, 3.4], look: [0, 0.1, 1.3], fov: 36 },
   zones:     { pos: [0.35, 0.55, -3.4], look: [0, 0.15, 2.6], fov: 40 },
+  trainer:   { pos: [-3.4, 0.7, 7.6], look: [0, 0.1, 1.6], fov: 34 },
   insights:  { pos: [-0.1, 0.3, -1.0], look: [0, 0.15, 2.6], fov: 46 },
   voice:     { pos: [-6.0, 1.8, 6.5], look: [0, 0.1, 1.0], fov: 34 },
   system:    { pos: [8.0, 4.5, 12.0], look: [0, 0.2, 1.3], fov: 32 },
@@ -63,7 +64,7 @@ const pointFS = /* glsl */`
     else if (vKind > 1.5 && vKind < 2.5) col = uIris;
     else if (vKind > 2.5) col = uLip;
     col += vec3(0.55, 1.0, 0.95) * vGlow;
-    gl_FragColor = vec4(col * a * (0.5 + vGlow), a * vAlpha);
+    gl_FragColor = vec4(col * a * (0.62 + vGlow), a * vAlpha);
   }`;
 const lineVS = /* glsl */`
   uniform float uScan, uDissolve;
@@ -401,6 +402,13 @@ export class Stage {
     this.dwellShown = 0;
     g.add(this.dwellMesh);
     this.rippleGeo = new THREE.RingGeometry(0.13, 0.16, 64);
+    // magnetic target lock: a bright rectangle on the virtual monitor
+    this.lockRect = new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints([
+      new THREE.Vector3(-0.5, -0.5, 0), new THREE.Vector3(0.5, -0.5, 0), new THREE.Vector3(0.5, 0.5, 0), new THREE.Vector3(-0.5, 0.5, 0)]),
+    new THREE.LineBasicMaterial({ color: 0x8ff8ee, transparent: true, opacity: 0.95, blending: THREE.AdditiveBlending, depthWrite: false }));
+    this.lockRect.position.z = 0.045;
+    this.lockRect.visible = false;
+    g.add(this.lockRect);
   }
 
   _buildPost() {
@@ -546,7 +554,15 @@ export class Stage {
       this.cam.fov = this.camFrom.fov + (this.camTo.fov - this.camFrom.fov) * k;
     }
     const sway = this.reducedMotion ? 0 : 1;
-    const cp = this.cam.pos.clone().add(new THREE.Vector3(
+    let base = this.cam.pos;
+    if (this.view === "deck" && this.camT >= 1 && sway) {
+      // slow cinematic orbit around the pilot: reveals depth and the gaze rays
+      const ang = Math.sin(t * 0.06) * 0.42;
+      const off = this.cam.pos.clone().sub(this.cam.look);
+      off.applyAxisAngle(new THREE.Vector3(0, 1, 0), ang);
+      base = this.cam.look.clone().add(off);
+    }
+    const cp = base.clone().add(new THREE.Vector3(
       Math.sin(t * 0.13) * 0.25 * sway + this.mouse.x * 0.6 * sway,
       Math.sin(t * 0.17) * 0.12 * sway - this.mouse.y * 0.35 * sway, 0));
     this.camera.position.copy(cp);
@@ -618,6 +634,15 @@ export class Stage {
       const col = f.paused ? 0xffb547 : f.control ? 0x8ff8ee : 0x4b6070;
       this.reticle.material.color.setHex(col);
       this.reticle.scale.setScalar(f.precision ? 0.6 : 1);
+    }
+    const tg = f && f.target;
+    this.lockRect.visible = !!tg;
+    if (tg) {
+      const [x, y, w, hh] = tg.rect;
+      const c = this._screenLocal([x + w / 2, y + hh / 2]);
+      const pad = 1.15 + Math.sin(t * 6) * 0.05;
+      this.lockRect.position.set(c.x, c.y, 0.045);
+      this.lockRect.scale.set(Math.max(w * SCREEN_W * pad, 0.05), Math.max(hh * SCREEN_H * pad, 0.05), 1);
     }
     const dw = f && f.dwell_on && f.control ? f.dwell : 0;
     if (Math.abs(dw - this.dwellShown) > 0.015 || (dw === 0 && this.dwellShown !== 0)) {

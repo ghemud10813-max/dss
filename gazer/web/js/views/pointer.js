@@ -53,7 +53,25 @@ export function buildPointer(root) {
   );
   left.append(head.el);
 
-  const dwell = panel({ title: "DWELL CLICK", code: "//P4", desc: "Hold the cursor still to act — the core of hands-free clicking." });
+  const mag = panel({ title: "MAGNETIC TARGETS", code: "//P0", hot: true,
+    desc: "The cursor locks onto the button or link you're looking at (via the OS accessibility tree), so small targets become easy — and every locked click teaches the gaze model." });
+  const magStatus = h("div", { class: "kv" }, h("span", {}, "Provider"), h("span"));
+  mag.add(
+    toggle({ label: "Magnetic targets", sub: "Gaze mode · Windows UI Automation (pip install comtypes)", path: "pointer.magnetic" }).el,
+    slider({ label: "Capture radius", path: "pointer.magnetic_radius_px", min: 15, max: 120, step: 5, fmt: (v) => `${v} px` }).el,
+    toggle({ label: "Dwell only on buttons & links", sub: "No accidental clicks while you read", path: "dwell.targets_only" }).el,
+    magStatus);
+  right.append(mag.el);
+
+  const dock = panel({ title: "EYE DOCK", code: "//P6",
+    desc: "A toolbar on the screen edge: rest your gaze on a button to choose what your next dwell does — right, double, drag, precise — or toggle keyboard, dwell and pause." });
+  dock.add(
+    toggle({ label: "Show the Eye Dock", sub: "Appears while control is engaged (desktop app)", path: "dock.enabled" }).el,
+    field("Side", select({ options: { right: "Right edge", left: "Left edge" }, path: "dock.side" }).el),
+    slider({ label: "Button size", path: "dock.button_px", min: 56, max: 130, step: 2, fmt: (v) => `${v} px` }).el,
+    slider({ label: "Dock dwell", path: "dock.dwell_ms", min: 300, max: 1500, step: 50, fmt: (v) => `${v} ms` }).el);
+
+  const dwell = panel({ title: "DWELL CLICK", code: "//P4", desc: "Hold the cursor still to act — the core of hands-free clicking. “Precise click” magnifies first, then clicks inside the lens." });
   const dwellAction = select({ options: actionOptions, path: "dwell.action" });
   onStore("catalog", () => dwellAction.fill(actionOptions()));
   dwell.add(
@@ -64,6 +82,7 @@ export function buildPointer(root) {
     field("Action", dwellAction.el),
   );
   right.append(dwell.el);
+  right.append(dock.el);
 
   const scroll = panel({ title: "SCROLL · ZOOM · WHEEL", code: "//P5" });
   const wheelBox = h("div", { class: "cmd-chips", style: { marginTop: "6px" } });
@@ -102,6 +121,9 @@ export function buildPointer(root) {
   return {
     el: view,
     onState(s) {
+      const t = s.targets;
+      magStatus.lastChild.textContent = t.available ? `${t.provider.toUpperCase()} · READY` : `${t.provider.toUpperCase()} · ${t.status.toUpperCase()}`;
+      magStatus.lastChild.style.color = t.available ? "var(--green)" : "var(--amber)";
       const p = s.profile.settings.pointer;
       for (const [k, el] of Object.entries(modeEls)) el.classList.toggle("on", p.mode === k);
       renderWheel(s.profile.settings.wheel.items);

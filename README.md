@@ -33,18 +33,25 @@ On first launch Gazer asks how you want to control it (**Eyes only** is recommen
 
 | You want to… | Eyes-only way | Also possible |
 |---|---|---|
-| Move the cursor | Look where you want it | Head mouse / joystick / head pointer / hybrid |
+| Move the cursor | Look where you want it. With **magnetic targets** on (Windows), the cursor locks onto the button or link you're looking at | Head mouse / joystick / head pointer / hybrid |
 | Left click | **Blink twice quickly**, wink left, or hold your gaze still for 1 s (dwell) | Smile, voice "click" |
-| Right click | Wink right | Action wheel, voice "right click" |
-| Hit a tiny target | Open the **zoom lens** (bottom-left zone or wheel) and click inside the magnified view | Precision mode |
+| Right / double click, drag | Wink right, or rest your gaze on RIGHT / DOUBLE / DRAG in the **Eye Dock**; your next dwell does that | Action wheel, voice "right click" |
+| Hit a tiny target | **PRECISE** in the Eye Dock: the first dwell magnifies, the second clicks exactly | Zoom lens, precision mode |
+| Read without accidental clicks | Turn on "Dwell only on buttons & links" (with magnetic targets) | Toggle DWELL off in the dock |
 | Scroll | **Look just below the screen** to scroll down, just above to scroll up; keep looking to go faster | Raise brows → scroll mode |
 | Back / forward | Glance past the left / right edge | Voice "go back" |
 | Everything else | Top-left corner opens the **action wheel**: double-click, right-click, drag, copy, paste, alt-tab… | Gesture bindings, voice |
-| Type | Bottom-right corner opens the **gaze keyboard** (with word prediction) | Voice dictation |
+| Type | Bottom-right corner opens the **gaze keyboard**: English or **हिन्दी** (Devanagari), with word and next-word prediction | Voice dictation |
 | Pause / resume | Long blink (≈1 s), or the top-right corner | Ctrl+Alt+P |
 | Fix drift | "Recenter" from the wheel | Ctrl+Alt+R; Gazer also learns from every click |
 
 Natural blinks never click: a double blink needs two complete, deliberate blinks within half a second. The test suite checks that 20 s of normal blinking produces zero clicks.
+
+**Getting good at it.** The **Gaze Trainer** is target practice for your eyes, with three tiers (warm-up, precision, sniper). It scores accuracy, time-to-hit and Fitts' throughput, and keeps your personal bests. The **optics check** during setup and the **lighting advisor** tell you when your light is costing accuracy (dark, backlit, uneven or overexposed), and the deck shows a **live accuracy** estimate from your own clicks.
+
+| ![Eye Dock](docs/img/eye-dock.jpg) | ![Trainer](docs/img/trainer-play.jpg) |
+|---|---|
+| **Eye Dock + magnetic target lock.** RIGHT is armed for the next dwell; the cursor is locked onto "Save". | **Gaze Trainer.** A live round driven by your eyes, with combo scoring. |
 
 ## The Command Deck
 
@@ -52,7 +59,8 @@ Natural blinks never click: a double blink needs two complete, deliberate blinks
 |---|---|
 | ![Calibration](docs/img/calibration-results.jpg) **Calibration**: imploding targets, validation on unseen points, and hands-free SAVE / RETRY by *looking* at a button. | ![Gestures](docs/img/gestures.jpg) **Gestures**: live strength of 15 facial signals, per-gesture thresholds, and a binding editor. |
 | ![Zones](docs/img/zones.jpg) **Gaze zones**: eight hot-zones on the screen border. | ![Insights](docs/img/insights.jpg) **Insights**: gaze heatmap, fixations, reading time, blink rate, and 20-20-20 break reminders. |
-| ![Calibrate view](docs/img/calibrate.jpg) **Calibrate**: presets, accuracy history, and model management. | ![Pointer](docs/img/pointer.jpg) **Pointer**: five pointing modes, dwell, scroll, zoom, and the action wheel. |
+| ![Calibrate view](docs/img/calibrate.jpg) **Calibrate**: presets, accuracy history, and model management. | ![Pointer](docs/img/pointer.jpg) **Pointer**: modes, magnetic targets, dwell rules, the Eye Dock, scroll, zoom, and the action wheel. |
+| ![Trainer results](docs/img/trainer-results.jpg) **Trainer results**: accuracy, time-to-hit, throughput, and personal best. | ![Optics check](docs/img/optics-check.jpg) **Optics check**: face lock and lighting are verified before you calibrate. |
 
 On the desktop itself, a click-through HUD overlay draws the reticle, dwell arc, zone glow, action wheel, zoom lens and toasts. The gaze keyboard types into whatever app is focused.
 
@@ -87,6 +95,7 @@ flowchart LR
 
 - **Gaze model.** Quadratic ridge regression on iris offsets and head pose, with cross-validated regularization and outlier rejection. It trains in milliseconds and keeps learning implicitly: every click is a labelled sample, because you were looking at what you clicked.
 - **Pointing.** Pure gaze (One-Euro filter, deadband, saccade-aware), MAGIC-style hybrid (eyes jump, head refines), plus three head-only modes. Gaze modes fall back to head control until you calibrate, so the cursor never just freezes.
+- **Magnetic targets.** On Windows, a background thread asks UI Automation which button, link or field is under and around your gaze. The cursor locks onto its centre (with hysteresis so it doesn't flicker), and each locked click becomes a precisely labelled training sample. That means pure gaze mode keeps getting more accurate with use.
 - **Calibration** is a UI-agnostic state machine. Samples are only taken after the eyes settle, blinks are rejected, and accuracy is measured on held-out points.
 - **Everything is local.** The hub binds to `127.0.0.1` and requires a per-launch token; foreign-origin WebSocket handshakes are refused, so a web page can't drive your PC through it.
 
@@ -118,10 +127,16 @@ Voice (optional, fully offline): `pip install vosk sounddevice`, then download t
 ## Development
 
 ```bash
-QT_QPA_PLATFORM=offscreen python -m pytest -q     # 51 tests, no webcam needed
+QT_QPA_PLATFORM=offscreen python -m pytest -q     # 69 tests, no webcam needed
+GAZER_BROWSER_TESTS=1 python -m pytest tests/test_web_smoke.py   # + real browser smoke test (needs playwright)
 ```
 
-The tests drive the real feature pipeline with the synthetic pilot. They cover calibration accuracy, eyes-only cursor tracking, double-blink clicks, immunity to natural blinks, zones, the hub's security and protocol, and the Qt overlay and keyboard.
+The tests drive the real feature pipeline with the synthetic pilot. They cover:
+- calibration accuracy, eyes-only cursor tracking, double-blink clicks and immunity to natural blinks
+- magnetic locking and learning, dwell rules, Eye Dock click types, precise zoom-click and zones
+- the lighting advisor and the keyboard (including Devanagari)
+- the hub's security and protocol
+- the Qt overlay, keyboard and dock
 
 ```
 gazer/
@@ -145,6 +160,8 @@ docs/ANALYSIS.md    review of the original project and what changed
 | Deck opens in the browser instead of a window | `pip install PyQt6-WebEngine` |
 | "Performance mode" toast | Your GPU is slow: bloom is disabled automatically. Set **System → Render quality → Low** to make it permanent. |
 | Linux/Wayland: clicks don't happen | pynput needs X11 (or XWayland) to inject input. |
+| Magnetic targets say "unavailable" | Windows only for now; install `comtypes` (included in requirements on Windows). |
+| Dwell clicks while I'm reading | Turn on **Dwell only on buttons & links**, or toggle DWELL off in the Eye Dock and click with a double blink. |
 
 ## Credits
 
